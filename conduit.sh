@@ -32,15 +32,17 @@ PROFILE_DIR="${CONDUIT_DIR:-$USER_HOME/vpns}"
 usage() {
     cat >&2 <<'EOF'
 usage:
-  conduit [--vpn <profile>] <command> [args...]
+  conduit [--provider <proton|mullvad>] [--vpn <profile>] <command> [args...]
   conduit show-vpn        list profiles
   conduit kill            tear down the tunnel
 
 If no profile is given, a random one is picked (excluding the last used).
+--vpn accepts substrings: "PDE-421" matches "PDE-421-DE-421.conf".
 Profile dir: ~/vpns (override with CONDUIT_DIR).
 examples:
   conduit discord
-  conduit --vpn mullvad-se discord
+  conduit --provider proton discord
+  conduit --vpn fra-403 discord
 EOF
     exit 1
 }
@@ -49,7 +51,10 @@ if [[ "${1:-}" == "show-vpn" ]]; then
     [[ -d "$PROFILE_DIR" ]] || { echo "profile dir missing: $PROFILE_DIR" >&2; exit 1; }
     last=$(cat "$STATE" 2>/dev/null || true)
     active=""
-    [[ -f "/etc/netns/$NS/profile" ]] && active=$(cat "/etc/netns/$NS/profile")
+    # only trust the marker if the namespace actually exists
+    if ip netns list 2>/dev/null | grep -qw "$NS"; then
+        [[ -f "/etc/netns/$NS/profile" ]] && active=$(cat "/etc/netns/$NS/profile")
+    fi
     shopt -s nullglob
     confs=("$PROFILE_DIR"/*.conf)
     shopt -u nullglob
@@ -71,12 +76,16 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 PROFILE_ARG=""
+PROVIDER_ARG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --vpn)    [[ $# -ge 2 ]] || usage; PROFILE_ARG="$2"; shift 2 ;;
-        --vpn=*)  PROFILE_ARG="${1#*=}"; shift ;;
-        kill)     ip netns del "$NS" 2>/dev/null && echo "tunnel down" || echo "no namespace"; exit 0 ;;
-        -h|--help) usage ;;
+        --vpn)         [[ $# -ge 2 ]] || usage; PROFILE_ARG="$2"; shift 2 ;;
+        --vpn=*)       PROFILE_ARG="${1#*=}"; shift ;;
+        --provider)    [[ $# -ge 2 ]] || usage; PROVIDER_ARG="$2"; shift 2 ;;
+        --provider=*)  PROVIDER_ARG="${1#*=}"; shift ;;
+        kill)          ip netns del "$NS" 2>/dev/null && echo "tunnel down" || echo "no namespace"
+                       rm -f "/etc/netns/$NS/profile"; exit 0 ;;
+        -h|--help)     usage ;;
         *) break ;;
     esac
 done
@@ -91,15 +100,46 @@ if [[ -n "$PROFILE_ARG" ]]; then
     p="$PROFILE_ARG"
     [[ "$p" != *.conf ]] && p="$p.conf"
     CONF="$PROFILE_DIR/$p"
-    [[ -f "$CONF" ]] || { echo "profile not found: $p (list: conduit show-vpn)" >&2; exit 1; }
+    if [[ ! -f "$CONF" ]]; then
+        # no exact match — try substring
+        matches=()
+        for f in "${all[@]}"; do
+            [[ $(basename "$f") == *"$PROFILE_ARG"* ]] && matches+=("$f")
+        done
+        if [[ ${#matches[@]} -eq 1 ]]; then
+            CONF="${matches[0]}"
+        elif [[ ${#matches[@]} -gt 1 ]]; then
+            echo "ambiguous: '$PROFILE_ARG' matches multiple profiles:" >&2
+            printf '  %s\n' "${matches[@]##*/}" >&2
+            exit 1
+        else
+            echo "profile not found: $p (list: conduit show-vpn)" >&2
+            exit 1
+        fi
+    fi
 else
+    candidates=("${all[@]}")
+    # provider filter — by filename prefix: PDE* = proton, rest = mullvad
+    # (adjust the patterns to your own naming scheme)
+    if [[ -n "$PROVIDER_ARG" ]]; then
+        filtered=()
+        for f in "${candidates[@]}"; do
+            case "$PROVIDER_ARG" in
+                proton)  [[ $(basename "$f") == PDE* ]] && filtered+=("$f") ;;
+                mullvad) [[ $(basename "$f") != PDE* ]] && filtered+=("$f") ;;
+                *) echo "unknown provider: $PROVIDER_ARG (proton|mullvad)" >&2; exit 1 ;;
+            esac
+        done
+        candidates=("${filtered[@]}")
+        [[ ${#candidates[@]} -gt 0 ]] || { echo "no profiles for provider: $PROVIDER_ARG" >&2; exit 1; }
+    fi
     last=$(cat "$STATE" 2>/dev/null || true)
-    candidates=()
-    for f in "${all[@]}"; do
+    without_last=()
+    for f in "${candidates[@]}"; do
         [[ $(basename "$f") == "$last" ]] && continue
-        candidates+=("$f")
+        without_last+=("$f")
     done
-    [[ ${#candidates[@]} -eq 0 ]] && candidates=("${all[@]}")
+    [[ ${#without_last[@]} -gt 0 ]] && candidates=("${without_last[@]}")
     CONF=$(printf '%s\n' "${candidates[@]}" | shuf -n1)
 fi
 
@@ -154,7 +194,7 @@ if ip netns list | grep -qw "$NS"; then
     exit 0
 fi
 
-cleanup() { ip netns del "$NS" 2>/dev/null || true; }
+cleanup() { ip netns del "$NS" 2>/dev/null || true; rm -f "/etc/netns/$NS/profile"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
