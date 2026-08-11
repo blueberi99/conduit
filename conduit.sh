@@ -6,9 +6,10 @@
 
 set -euo pipefail
 
-# -----------------------------------------------------------------------------
+
+# =============================================================================
 # Global configuration
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 
@@ -17,19 +18,22 @@ PROFILE_DIR="${CONDUIT_DIR:-$HOME/vpns}"
 RUN_BASE="/run/conduit"
 STATE_BASE="/var/lib/conduit"
 
-USER_RUN_DIR="$RUN_BASE/$(id -u)"
-USER_STATE_DIR="$STATE_BASE/$(id -u)"
+LOCAL_UID="$(id -u)"
+
+USER_RUN_DIR="$RUN_BASE/$LOCAL_UID"
+USER_STATE_DIR="$STATE_BASE/$LOCAL_UID"
 LAST_STATE="$USER_STATE_DIR/last-profile"
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Generic helpers
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 die() {
     echo "conduit: $*" >&2
     exit 1
 }
+
 
 usage() {
     cat <<'EOF'
@@ -38,13 +42,22 @@ usage:
 
 options:
   --vpn <profile>        use a specific WireGuard profile
-  --provider <name>      choose a random profile from ~/vpns/<name>/
+  --provider <name>      choose a profile from ~/vpns/<name>/
+  -d, --detach           force detached mode
+  -f, --foreground       force foreground mode
 
-commands:
-  conduit show-vpn       list available profiles
-  conduit status         list active Conduit sessions
-  conduit kill [target]  stop one session
-  conduit kill --all     stop all your sessions
+management:
+  conduit show-vpn
+  conduit status
+
+  conduit attach
+  conduit attach <session>
+  conduit attach <session> <command> [args...]
+
+  conduit logs [session]
+
+  conduit kill <session>
+  conduit kill --all
 
 examples:
   conduit discord
@@ -52,8 +65,22 @@ examples:
 
   conduit --vpn PDE-778 discord
   conduit --provider proton discord
-  conduit --provider mullvad discord
   conduit --provider cloudflare firefox
+
+  conduit -f --provider cloudflare curl https://ifconfig.me
+
+  conduit status
+
+  conduit attach
+  conduit attach 23af
+  conduit attach discord
+  conduit attach 23af curl https://ifconfig.me
+
+  conduit logs discord
+
+  conduit kill discord
+  conduit kill 23af
+  conduit kill --all
 
 profile layout:
   ~/vpns/*.conf
@@ -67,7 +94,10 @@ examples:
 override profile directory:
   CONDUIT_DIR=/path/to/profiles conduit discord
 
-Each launch gets its own isolated network namespace.
+Each normal launch gets its own isolated network namespace.
+
+GUI/non-shell commands are detached by default.
+Interactive shells stay in the foreground by default.
 EOF
 }
 
@@ -88,9 +118,33 @@ is_ns_up() {
 }
 
 
-# -----------------------------------------------------------------------------
+namespace_pids() {
+    local ns="$1"
+
+    ip netns pids "$ns" 2>/dev/null || true
+}
+
+
+namespace_pid_count() {
+    local ns="$1"
+
+    local count=0
+    local pid
+
+    while IFS= read -r pid; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        count=$((count + 1))
+    done < <(
+        namespace_pids "$ns"
+    )
+
+    printf '%s\n' "$count"
+}
+
+
+# =============================================================================
 # Profile discovery
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 profile_id() {
     local file="$1"
@@ -117,6 +171,8 @@ load_all_profiles() {
             -print0 \
             2>/dev/null
     )
+
+    return 0
 }
 
 
@@ -130,12 +186,12 @@ filter_provider() {
 
     CANDIDATES=()
 
-    # Preferred provider-agnostic layout:
+    # Preferred provider-agnostic structure:
     #
     # ~/vpns/proton/*.conf
     # ~/vpns/mullvad/*.conf
     # ~/vpns/cloudflare/*.conf
-    # ~/vpns/whatever/*.conf
+    # ~/vpns/anything/*.conf
     #
     if [[ -d "$provider_dir" ]]; then
         for file in "${ALL_PROFILES[@]}"; do
@@ -147,10 +203,10 @@ filter_provider() {
         return 0
     fi
 
-    # Backward compatibility with the old flat layout.
+    # Legacy flat-layout compatibility.
     #
     # PDE* = Proton
-    # non-PDE root profiles = Mullvad
+    # other top-level configs = Mullvad
     #
     case "$provider" in
         proton)
@@ -184,6 +240,7 @@ filter_provider() {
     return 0
 }
 
+
 select_profile() {
     local vpn_arg="$1"
     local provider_arg="$2"
@@ -204,6 +261,7 @@ select_profile() {
     ((${#ALL_PROFILES[@]} > 0)) ||
         die "no WireGuard profiles found under $PROFILE_DIR"
 
+
     if [[ -n "$provider_arg" ]]; then
         [[ "$provider_arg" =~ ^[A-Za-z0-9._-]+$ ]] ||
             die "invalid provider name: $provider_arg"
@@ -219,11 +277,10 @@ select_profile() {
     fi
 
 
-    # Explicit profile.
+    # Explicit profile selection.
     if [[ -n "$vpn_arg" ]]; then
         wanted="$vpn_arg"
 
-        # Exact match first.
         for file in "${pool[@]}"; do
             id="$(profile_id "$file")"
             base="${file##*/}"
@@ -236,11 +293,13 @@ select_profile() {
             fi
         done
 
+
         if ((${#exact[@]} == 1)); then
             CONF="${exact[0]}"
             PROFILE_ID="$(profile_id "$CONF")"
-            return
+            return 0
         fi
+
 
         if ((${#exact[@]} > 1)); then
             echo "conduit: ambiguous profile '$vpn_arg':" >&2
@@ -253,7 +312,7 @@ select_profile() {
         fi
 
 
-        # Substring match.
+        # Substring matching.
         for file in "${pool[@]}"; do
             id="$(profile_id "$file")"
             base="${file##*/}"
@@ -264,11 +323,13 @@ select_profile() {
             fi
         done
 
+
         if ((${#matches[@]} == 1)); then
             CONF="${matches[0]}"
             PROFILE_ID="$(profile_id "$CONF")"
-            return
+            return 0
         fi
+
 
         if ((${#matches[@]} > 1)); then
             echo "conduit: ambiguous profile '$vpn_arg':" >&2
@@ -280,59 +341,78 @@ select_profile() {
             exit 1
         fi
 
+
         die "profile not found: $vpn_arg"
     fi
 
 
-    # Random selection, avoiding the previous profile when possible.
+    # Random profile selection.
+    #
+    # Avoid the previously-used profile when another option exists.
     if [[ -r "$LAST_STATE" ]]; then
         last="$(<"$LAST_STATE")"
     fi
 
+
     for file in "${pool[@]}"; do
-        [[ "$(profile_id "$file")" == "$last" ]] ||
+        if [[ "$(profile_id "$file")" != "$last" ]]; then
             without_last+=("$file")
+        fi
     done
+
 
     if ((${#without_last[@]} > 0)); then
         pool=("${without_last[@]}")
     fi
 
+
     CONF="${pool[RANDOM % ${#pool[@]}]}"
     PROFILE_ID="$(profile_id "$CONF")"
+
+    return 0
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Session IDs
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 new_session_id() {
     local uuid
     local id
     local try
+    local ns
 
     for try in {1..32}; do
         if [[ -r /proc/sys/kernel/random/uuid ]]; then
             uuid="$(</proc/sys/kernel/random/uuid)"
             id="${uuid%%-*}"
         else
-            id="$(printf '%08x' "$((RANDOM << 16 | RANDOM))")"
+            id="$(
+                printf '%08x' \
+                    "$(( (RANDOM << 16) | RANDOM ))"
+            )"
         fi
+
+        ns="conduit-$LOCAL_UID-$id"
 
         [[ ! -e "$USER_RUN_DIR/$id" ]] || continue
 
+        if is_ns_up "$ns"; then
+            continue
+        fi
+
         printf '%s\n' "$id"
-        return
+        return 0
     done
 
     die "could not allocate a unique session ID"
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Session environment capture
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 write_session_file() {
     local temp_base
@@ -368,6 +448,7 @@ write_session_file() {
 
         QT_QPA_PLATFORM
         QT_IM_MODULE
+
         GDK_BACKEND
         GTK_IM_MODULE
 
@@ -394,6 +475,7 @@ write_session_file() {
         LC_CTYPE
     )
 
+
     if [[ -n "${XDG_RUNTIME_DIR:-}" &&
           -d "${XDG_RUNTIME_DIR:-}" &&
           -w "${XDG_RUNTIME_DIR:-}" ]]; then
@@ -401,6 +483,7 @@ write_session_file() {
     else
         temp_base="${TMPDIR:-/tmp}"
     fi
+
 
     umask 077
 
@@ -410,11 +493,12 @@ write_session_file() {
 
     chmod 0600 "$SESSION_FILE"
 
+
     for key in "${keys[@]}"; do
         if [[ -v "$key" ]]; then
             value="${!key}"
 
-            # Never serialize multiline values.
+            # Don't serialize multiline environment values.
             [[ "$value" == *$'\n'* ]] && continue
 
             printf '%s=%s\n' \
@@ -426,9 +510,9 @@ write_session_file() {
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Privilege escalation
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 run_elevated() {
     local elevator="${CONDUIT_ELEVATOR:-auto}"
@@ -465,9 +549,9 @@ run_elevated() {
 }
 
 
-# -----------------------------------------------------------------------------
-# Resolve invoking user after elevation
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Resolve original user after elevation
+# =============================================================================
 
 resolve_invoking_user() {
     local passwd_line=""
@@ -487,6 +571,7 @@ resolve_invoking_user() {
             "cannot identify invoking user; run conduit as your regular user"
     fi
 
+
     if command -v getent >/dev/null 2>&1; then
         passwd_line="$(
             getent passwd "$USER_UID" |
@@ -495,7 +580,8 @@ resolve_invoking_user() {
         )"
     fi
 
-    # Minimal fallback for distributions without getent.
+
+    # Minimal fallback for systems without getent.
     if [[ -z "$passwd_line" ]]; then
         passwd_line="$(
             awk -F: \
@@ -505,8 +591,10 @@ resolve_invoking_user() {
         )"
     fi
 
+
     [[ -n "$passwd_line" ]] ||
         die "cannot resolve passwd entry for uid $USER_UID"
+
 
     IFS=: read -r \
         USER_NAME \
@@ -518,6 +606,7 @@ resolve_invoking_user() {
         USER_SHELL \
         <<< "$passwd_line"
 
+
     [[ -n "$USER_NAME" ]] ||
         die "cannot resolve invoking username"
 
@@ -527,15 +616,16 @@ resolve_invoking_user() {
     [[ -n "$USER_SHELL" ]] ||
         USER_SHELL="/bin/sh"
 
+
     ROOT_RUN_USER_DIR="$RUN_BASE/$USER_UID"
     ROOT_STATE_USER_DIR="$STATE_BASE/$USER_UID"
     ROOT_LAST_STATE="$ROOT_STATE_USER_DIR/last-profile"
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Read captured desktop environment
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 read_session_file() {
     local file="$1"
@@ -549,22 +639,27 @@ read_session_file() {
 
     USER_PATH="/usr/local/bin:/usr/bin:/bin"
 
+
     [[ -f "$file" && ! -L "$file" ]] ||
         die "invalid session environment file"
+
 
     owner="$(
         stat -Lc '%u' "$file" 2>/dev/null ||
             true
     )"
 
+
     [[ "$owner" == "$USER_UID" ]] ||
         die "session environment file has wrong owner"
+
 
     while IFS= read -r line; do
         [[ "$line" == *=* ]] || continue
 
         key="${line%%=*}"
         value="${line#*=}"
+
 
         case "$key" in
             PATH)
@@ -616,9 +711,9 @@ read_session_file() {
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # WireGuard config parser
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 config_values() {
     local wanted_key="$1"
@@ -632,7 +727,7 @@ config_values() {
             section=""
         }
 
-        /^[[:space:]]*#/ {
+        /^[[:space:]]*[#;]/ {
             next
         }
 
@@ -683,14 +778,15 @@ split_config_csv() {
 
     destination=()
 
+
     while IFS= read -r line; do
         IFS=',' read -r -a parts <<< "$line"
 
         for item in "${parts[@]}"; do
-            # trim left
+            # Trim left.
             item="${item#"${item%%[![:space:]]*}"}"
 
-            # trim right
+            # Trim right.
             item="${item%"${item##*[![:space:]]}"}"
 
             [[ -n "$item" ]] &&
@@ -725,6 +821,7 @@ parse_profile() {
         "$CONF" \
         ALLOWED_IPS
 
+
     CONFIG_MTU=""
 
     while IFS= read -r CONFIG_MTU; do
@@ -736,11 +833,13 @@ parse_profile() {
             "$CONF"
     )
 
+
     ((${#ADDRS[@]} > 0)) ||
         die "profile has no Address"
 
     ((${#ALLOWED_IPS[@]} > 0)) ||
         die "profile has no AllowedIPs"
+
 
     HAS_V4=0
     HAS_V6=0
@@ -748,7 +847,9 @@ parse_profile() {
     FULL_V4=0
     FULL_V6=0
 
+
     local value
+
 
     for value in "${ADDRS[@]}"; do
         if [[ "$value" == *:* ]]; then
@@ -758,6 +859,7 @@ parse_profile() {
         fi
     done
 
+
     for value in "${ALLOWED_IPS[@]}"; do
         [[ "$value" == "0.0.0.0/0" ]] &&
             FULL_V4=1
@@ -766,13 +868,16 @@ parse_profile() {
             FULL_V6=1
     done
 
+
     ((FULL_V4 || FULL_V6)) ||
         die \
             "profile is not full-tunnel; AllowedIPs needs 0.0.0.0/0 and/or ::/0"
 
+
     ((FULL_V4 == 0 || HAS_V4 == 1)) ||
         die \
             "profile routes IPv4 but has no IPv4 Address"
+
 
     ((FULL_V6 == 0 || HAS_V6 == 1)) ||
         die \
@@ -780,15 +885,17 @@ parse_profile() {
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # MTU
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 choose_mtu() {
     local dev=""
     local host_mtu=""
 
-    # Respect provider config first.
+    # Respect provider MTU first.
+    #
+    # Cloudflare WARP configs commonly specify MTU=1280.
     if [[ -n "$CONFIG_MTU" ]]; then
         [[ "$CONFIG_MTU" =~ ^[0-9]+$ ]] ||
             die "invalid MTU: $CONFIG_MTU"
@@ -797,10 +904,14 @@ choose_mtu() {
             die "MTU out of range: $CONFIG_MTU"
 
         MTU="$CONFIG_MTU"
-        return
+
+        return 0
     fi
 
-    # Otherwise use the physical default route.
+
+    # Generic fallback:
+    #
+    # physical/default interface MTU minus WireGuard overhead.
     dev="$(
         ip -4 route show default 2>/dev/null |
             awk '
@@ -814,6 +925,7 @@ choose_mtu() {
                 }
             '
     )"
+
 
     if [[ -z "$dev" ]]; then
         dev="$(
@@ -831,13 +943,17 @@ choose_mtu() {
         )"
     fi
 
+
     if [[ -n "$dev" &&
           -r "/sys/class/net/$dev/mtu" ]]; then
+
         host_mtu="$(<"/sys/class/net/$dev/mtu")"
     fi
 
+
     if [[ "$host_mtu" =~ ^[0-9]+$ &&
           "$host_mtu" -gt 80 ]]; then
+
         MTU=$((host_mtu - 80))
     else
         MTU=1420
@@ -845,22 +961,24 @@ choose_mtu() {
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Namespace-specific /etc
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 write_namespace_etc() {
     mkdir -p "$NETNS_ETC"
 
     : > "$NETNS_ETC/resolv.conf"
 
+
     local dns
     local count=0
 
     local -a searches=()
 
+
     for dns in "${DNS_VALUES[@]}"; do
-        # IPv6 address
+        # IPv6 nameserver.
         if [[ "$dns" == *:* ]]; then
             printf 'nameserver %s\n' \
                 "$dns" \
@@ -868,7 +986,7 @@ write_namespace_etc() {
 
             count=$((count + 1))
 
-        # IPv4 address
+        # IPv4 nameserver.
         elif [[ "$dns" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
             printf 'nameserver %s\n' \
                 "$dns" \
@@ -876,13 +994,14 @@ write_namespace_etc() {
 
             count=$((count + 1))
 
-        # DNS search domain
+        # wg-quick also allows DNS search domains.
         else
             searches+=("$dns")
         fi
     done
 
-    # Safe fallback when the VPN profile contains no DNS.
+
+    # Safe fallback if the provider supplied no DNS.
     if ((count == 0)); then
         if ((FULL_V4)); then
             echo "nameserver 1.1.1.1" \
@@ -893,6 +1012,7 @@ write_namespace_etc() {
         fi
     fi
 
+
     if ((${#searches[@]} > 0)); then
         {
             printf 'search'
@@ -901,8 +1021,8 @@ write_namespace_etc() {
         } >> "$NETNS_ETC/resolv.conf"
     fi
 
-    # Use ordinary DNS inside the VPN namespace instead of a host-local
-    # resolver service such as systemd-resolved.
+
+    # Avoid host-local NSS resolver services inside the VPN namespace.
     if [[ -r /etc/nsswitch.conf ]]; then
         awk '
             BEGIN {
@@ -930,18 +1050,19 @@ write_namespace_etc() {
             > "$NETNS_ETC/nsswitch.conf"
     fi
 
+
     chmod 0644 \
         "$NETNS_ETC/resolv.conf" \
         "$NETNS_ETC/nsswitch.conf"
 }
 
 
-# -----------------------------------------------------------------------------
-# Root-side dependency check
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Root dependency checks
+# =============================================================================
 
 check_root_dependencies() {
-    local command
+    local executable
 
     local -a commands=(
         ip
@@ -950,51 +1071,80 @@ check_root_dependencies() {
         awk
         stat
         env
+        setsid
     )
 
-    for command in "${commands[@]}"; do
-        command -v "$command" >/dev/null 2>&1 ||
-            die "required command not found: $command"
+
+    for executable in "${commands[@]}"; do
+        command -v "$executable" >/dev/null 2>&1 ||
+            die "required command not found: $executable"
     done
+
 
     if ! command -v setpriv >/dev/null 2>&1 &&
        ! command -v runuser >/dev/null 2>&1; then
+
         die "need setpriv or runuser to drop privileges"
     fi
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Profile validation
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 validate_profile() {
     local owner
+    local mode
+    local mode_octal
 
     CONF="$(readlink -f "$CONF")"
 
-    [[ -f "$CONF" && ! -L "$CONF" ]] ||
+
+    [[ -f "$CONF" ]] ||
         die "profile not found: $CONF"
+
 
     owner="$(
         stat -Lc '%u' "$CONF" 2>/dev/null ||
             true
     )"
 
+
     [[ "$owner" == "$USER_UID" ]] ||
         die \
             "profile must be owned by $USER_NAME: $CONF"
+
+
+    mode="$(
+        stat -Lc '%a' "$CONF" 2>/dev/null ||
+            true
+    )"
+
+
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
+        die "cannot determine profile permissions: $CONF"
+
+
+    mode_octal=$((8#$mode))
+
+
+    if ((mode_octal & 077)); then
+        die \
+            "profile permissions are too open: $CONF (run: chmod 600 '$CONF')"
+    fi
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Session state
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 prepare_session_state() {
     mkdir -p \
         "$ROOT_RUN_USER_DIR" \
         "$ROOT_STATE_USER_DIR"
+
 
     chmod 0755 \
         "$RUN_BASE" \
@@ -1004,9 +1154,11 @@ prepare_session_state() {
         2>/dev/null ||
         true
 
+
     mkdir "$SESSION_DIR"
 
     chmod 0755 "$SESSION_DIR"
+
 
     printf '%s\n' "$NS" \
         > "$SESSION_DIR/namespace"
@@ -1020,34 +1172,40 @@ prepare_session_state() {
     printf '%s\n' "$MTU" \
         > "$SESSION_DIR/mtu"
 
+    printf '%s\n' "$DETACH" \
+        > "$SESSION_DIR/detached"
+
     printf '%s\n' "$(date +%s)" \
         > "$SESSION_DIR/started"
 
     printf '%s\n' "$PROFILE_ID" \
         > "$ROOT_LAST_STATE"
 
+
     chmod 0644 \
         "$SESSION_DIR/namespace" \
         "$SESSION_DIR/profile" \
         "$SESSION_DIR/app" \
         "$SESSION_DIR/mtu" \
+        "$SESSION_DIR/detached" \
         "$SESSION_DIR/started" \
         "$ROOT_LAST_STATE"
+
+
+    # Keep a sanitized copy so `conduit attach` can reuse the desktop session.
+    SESSION_ENV_FILE="$SESSION_DIR/session.env"
+
+    cat "$SESSION_FILE" > "$SESSION_ENV_FILE"
+
+    chown "$USER_UID:$USER_GID" "$SESSION_ENV_FILE"
+
+    chmod 0600 "$SESSION_ENV_FILE"
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Session cleanup
-# -----------------------------------------------------------------------------
-
-namespace_pids() {
-    local ns="$1"
-
-    ip netns pids "$ns" \
-        2>/dev/null ||
-        true
-}
-
+# =============================================================================
 
 kill_namespace_processes() {
     local ns="$1"
@@ -1057,20 +1215,20 @@ kill_namespace_processes() {
 
     local -a pids=()
 
+
     mapfile -t pids < <(
         namespace_pids "$ns"
     )
 
-    for pid in "${pids[@]}"; do
-        [[ "$pid" =~ ^[0-9]+$ ]] ||
-            continue
 
-        kill -TERM "$pid" \
-            2>/dev/null ||
-            true
+    for pid in "${pids[@]}"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+
+        kill -TERM "$pid" 2>/dev/null || true
     done
 
-    # Give applications a few seconds to exit cleanly.
+
+    # Allow graceful application shutdown.
     for attempt in 1 2 3; do
         sleep 1
 
@@ -1081,16 +1239,14 @@ kill_namespace_processes() {
         )
 
         ((${#pids[@]} == 0)) &&
-            return
+            return 0
     done
 
-    for pid in "${pids[@]}"; do
-        [[ "$pid" =~ ^[0-9]+$ ]] ||
-            continue
 
-        kill -KILL "$pid" \
-            2>/dev/null ||
-            true
+    for pid in "${pids[@]}"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+
+        kill -KILL "$pid" 2>/dev/null || true
     done
 }
 
@@ -1100,12 +1256,14 @@ cleanup_current_session() {
         2>/dev/null ||
         true
 
-    # If setup failed before the interface was moved, remove it here.
+
+    # Setup might fail before the temporary host-side WG interface gets moved.
     if [[ -n "${WG_HOST:-}" ]]; then
         ip link del "$WG_HOST" \
             2>/dev/null ||
             true
     fi
+
 
     rm -rf \
         "$NETNS_ETC" \
@@ -1125,6 +1283,7 @@ terminate_current_session() {
 wait_for_session_empty() {
     local -a pids=()
 
+
     while is_ns_up "$NS"; do
         pids=()
 
@@ -1132,27 +1291,35 @@ wait_for_session_empty() {
             namespace_pids "$NS"
         )
 
+
         ((${#pids[@]} == 0)) &&
-            return
+            return 0
+
 
         sleep 1
     done
+
+
+    return 0
 }
 
 
-# -----------------------------------------------------------------------------
-# Run application as original user
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Run an application as the original user
+# =============================================================================
 
 run_as_user_in_ns() {
     local env_bin
 
     env_bin="$(command -v env)"
 
+
     local -a base_env=(
         "HOME=$USER_HOME"
+
         "USER=$USER_NAME"
         "LOGNAME=$USER_NAME"
+
         "SHELL=$USER_SHELL"
 
         "PATH=$USER_PATH"
@@ -1163,6 +1330,7 @@ run_as_user_in_ns() {
         "CONDUIT_PROFILE=$PROFILE_ID"
     )
 
+
     case "${1:-}" in
         bash|*/bash|\
         sh|*/sh|\
@@ -1170,10 +1338,11 @@ run_as_user_in_ns() {
         fish|*/fish)
 
             echo \
-                ">> entered Conduit session $SESSION_ID (type 'exit' to leave)" \
+                ">> attached to Conduit session $SESSION_ID (type 'exit' to leave)" \
                 >&2
             ;;
     esac
+
 
     if command -v setpriv >/dev/null 2>&1; then
         ip netns exec "$NS" \
@@ -1188,8 +1357,9 @@ run_as_user_in_ns() {
                 "${SESSION_ENV[@]}" \
                 "$@"
 
-        return
+        return $?
     fi
+
 
     ip netns exec "$NS" \
         runuser \
@@ -1203,9 +1373,9 @@ run_as_user_in_ns() {
 }
 
 
-# -----------------------------------------------------------------------------
-# Root: create and run one isolated session
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Root: create one isolated VPN session
+# =============================================================================
 
 root_run() {
     SESSION_ID="$1"
@@ -1213,24 +1383,34 @@ root_run() {
     PROFILE_ID="$3"
     SESSION_FILE="$4"
     APP_LABEL="$5"
+    DETACH="$6"
 
-    shift 5
+    shift 6
+
+
+    [[ "$DETACH" == "0" || "$DETACH" == "1" ]] ||
+        die "invalid internal detach mode"
+
 
     [[ "${1:-}" == "--" ]] ||
         die "internal argument error"
 
     shift
 
+
     (($# > 0)) ||
         die "missing command"
 
+
     [[ "$SESSION_ID" =~ ^[0-9a-f]{8}$ ]] ||
         die "invalid internal session ID"
+
 
     APP_LABEL="${APP_LABEL//[^A-Za-z0-9._+-]/_}"
 
     [[ -n "$APP_LABEL" ]] ||
         APP_LABEL="app"
+
 
     resolve_invoking_user
     check_root_dependencies
@@ -1239,6 +1419,7 @@ root_run() {
 
     parse_profile
     choose_mtu
+
 
     ROOT_RUN_USER_DIR="$RUN_BASE/$USER_UID"
     ROOT_STATE_USER_DIR="$STATE_BASE/$USER_UID"
@@ -1250,17 +1431,18 @@ root_run() {
 
     NETNS_ETC="/etc/netns/$NS"
 
-    # Linux interface names are limited, so keep the temporary host-side name
-    # short and unique.
-    WG_HOST="cw${SESSION_ID:0:10}"
+    # Short unique host-side interface name.
+    WG_HOST="cw$SESSION_ID"
+
 
     [[ ! -e "$SESSION_DIR" ]] ||
         die "session already exists: $SESSION_ID"
 
-    ! is_ns_up "$NS" ||
+    if is_ns_up "$NS"; then
         die "network namespace already exists: $NS"
+    fi
 
-    # This trap only knows about THIS invocation's namespace.
+
     trap cleanup_current_session EXIT
 
     trap '
@@ -1269,37 +1451,50 @@ root_run() {
         exit 130
     ' INT TERM HUP
 
-    # Create an independent network namespace.
+
+    # -------------------------------------------------------------------------
+    # Namespace + WireGuard
+    # -------------------------------------------------------------------------
+
     ip netns add "$NS"
 
-    # Create WireGuard in the host namespace first.
+
+    # Create WireGuard in the host namespace.
+    #
+    # The encrypted UDP socket remains attached to the host namespace after
+    # the interface itself moves into the application namespace.
     ip link add \
         "$WG_HOST" \
         type wireguard
 
-    # Strip wg-quick-only fields such as Address/DNS/MTU/hooks.
-    # Endpoint hostname resolution happens while configuring from the host.
+
+    # `wg-quick strip` removes Address/DNS/MTU/hooks but preserves normal
+    # WireGuard interface/peer configuration.
     wg setconf \
         "$WG_HOST" \
         <(wg-quick strip "$CONF")
 
-    # Move the interface to the new namespace.
+
     ip link set \
         "$WG_HOST" \
         netns "$NS"
 
-    # Every namespace can independently call its interface wg0.
+
+    # Each network namespace can independently use the name wg0.
     ip -n "$NS" \
         link set \
         "$WG_HOST" \
         name wg0
+
 
     ip -n "$NS" \
         link set \
         dev wg0 \
         mtu "$MTU"
 
+
     local address
+
 
     for address in "${ADDRS[@]}"; do
         ip -n "$NS" \
@@ -1308,22 +1503,25 @@ root_run() {
             dev wg0
     done
 
+
     ip -n "$NS" \
         link set \
         lo up
+
 
     ip -n "$NS" \
         link set \
         wg0 up
 
-    # The namespace has no physical interface, so these routes are also the
-    # kill-switch: no wg0 means no network path.
+
+    # Only create protocol families actually covered by AllowedIPs.
     if ((FULL_V4)); then
         ip -n "$NS" \
             route add \
             default \
             dev wg0
     fi
+
 
     if ((FULL_V6)); then
         ip -n "$NS" \
@@ -1332,8 +1530,11 @@ root_run() {
             dev wg0
     fi
 
+
     write_namespace_etc
+
     prepare_session_state
+
 
     echo ">> session:   $SESSION_ID" >&2
     echo ">> app:       $APP_LABEL" >&2
@@ -1341,7 +1542,68 @@ root_run() {
     echo ">> namespace: $NS" >&2
     echo ">> mtu:       $MTU" >&2
 
+
+    # -------------------------------------------------------------------------
+    # Detached mode
+    # -------------------------------------------------------------------------
+
+    if ((DETACH)); then
+        local log_file="$SESSION_DIR/log"
+
+
+        : > "$log_file"
+
+        chown "$USER_UID:$USER_GID" "$log_file"
+        chmod 0600 "$log_file"
+
+
+        # The supervisor stays in the host network namespace.
+        #
+        # The application itself will be placed into the VPN namespace.
+        #
+        # setsid gives the supervisor a new session so closing the original
+        # terminal does not kill the VPN/app lifecycle.
+        setsid \
+            "$SELF" \
+            --_root-supervise \
+            "$SESSION_ID" \
+            -- \
+            "$@" \
+            </dev/null \
+            >>"$log_file" \
+            2>&1 &
+
+
+        local supervisor_pid=$!
+
+
+        printf '%s\n' \
+            "$supervisor_pid" \
+            > "$SESSION_DIR/supervisor"
+
+
+        chmod 0644 \
+            "$SESSION_DIR/supervisor"
+
+
+        # The detached supervisor now owns lifecycle cleanup.
+        trap - EXIT INT TERM HUP
+
+
+        echo ">> detached" >&2
+        echo ">> log: $log_file" >&2
+
+
+        return 0
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Foreground mode
+    # -------------------------------------------------------------------------
+
     local rc=0
+
 
     if run_as_user_in_ns "$@"; then
         rc=0
@@ -1349,42 +1611,207 @@ root_run() {
         rc=$?
     fi
 
-    # Some GUI apps fork children and let their launcher process exit.
-    # Keep the VPN alive while anything is still inside this namespace.
+
+    # Electron/browser launchers may exit while children continue running.
     wait_for_session_empty
+
 
     cleanup_current_session
 
+
     trap - EXIT INT TERM HUP
+
 
     return "$rc"
 }
 
 
-# -----------------------------------------------------------------------------
-# Root: kill sessions
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Root: detached lifecycle supervisor
+# =============================================================================
+
+root_supervise() {
+    SESSION_ID="$1"
+
+    shift
+
+
+    [[ "${1:-}" == "--" ]] ||
+        die "internal supervisor argument error"
+
+    shift
+
+
+    (($# > 0)) ||
+        die "missing supervisor command"
+
+
+    [[ "$SESSION_ID" =~ ^[0-9a-f]{8}$ ]] ||
+        die "invalid supervisor session ID"
+
+
+    resolve_invoking_user
+    check_root_dependencies
+
+
+    ROOT_RUN_USER_DIR="$RUN_BASE/$USER_UID"
+
+    SESSION_DIR="$ROOT_RUN_USER_DIR/$SESSION_ID"
+
+
+    [[ -d "$SESSION_DIR" ]] ||
+        die "session state disappeared: $SESSION_ID"
+
+
+    NS="$(<"$SESSION_DIR/namespace")"
+    PROFILE_ID="$(<"$SESSION_DIR/profile")"
+    APP_LABEL="$(<"$SESSION_DIR/app")"
+
+    SESSION_ENV_FILE="$SESSION_DIR/session.env"
+
+    NETNS_ETC="/etc/netns/$NS"
+
+    WG_HOST=""
+
+
+    [[ "$NS" == "conduit-$USER_UID-$SESSION_ID" ]] ||
+        die "invalid supervisor namespace state"
+
+
+    is_ns_up "$NS" ||
+        die "network namespace disappeared: $NS"
+
+
+    read_session_file "$SESSION_ENV_FILE"
+
+
+    trap '
+        terminate_current_session
+        trap - EXIT
+        exit 130
+    ' INT TERM HUP
+
+
+    local rc=0
+
+
+    if run_as_user_in_ns "$@"; then
+        rc=0
+    else
+        rc=$?
+    fi
+
+
+    wait_for_session_empty
+
+
+    cleanup_current_session
+
+
+    trap - EXIT INT TERM HUP
+
+
+    return "$rc"
+}
+
+
+# =============================================================================
+# Root: attach command/shell to an existing session
+# =============================================================================
+
+root_attach() {
+    SESSION_ID="$1"
+
+    shift
+
+
+    [[ "${1:-}" == "--" ]] ||
+        die "internal attach argument error"
+
+    shift
+
+
+    (($# > 0)) ||
+        die "missing attach command"
+
+
+    [[ "$SESSION_ID" =~ ^[0-9a-f]{8}$ ]] ||
+        die "invalid session ID: $SESSION_ID"
+
+
+    resolve_invoking_user
+    check_root_dependencies
+
+
+    ROOT_RUN_USER_DIR="$RUN_BASE/$USER_UID"
+
+    SESSION_DIR="$ROOT_RUN_USER_DIR/$SESSION_ID"
+
+
+    [[ -d "$SESSION_DIR" ]] ||
+        die "session not found: $SESSION_ID"
+
+
+    NS="$(<"$SESSION_DIR/namespace")"
+    PROFILE_ID="$(<"$SESSION_DIR/profile")"
+    APP_LABEL="$(<"$SESSION_DIR/app")"
+
+    SESSION_ENV_FILE="$SESSION_DIR/session.env"
+
+    NETNS_ETC="/etc/netns/$NS"
+
+    WG_HOST=""
+
+
+    [[ "$NS" == "conduit-$USER_UID-$SESSION_ID" ]] ||
+        die "invalid session state"
+
+
+    is_ns_up "$NS" ||
+        die "session is no longer active: $SESSION_ID"
+
+
+    read_session_file "$SESSION_ENV_FILE"
+
+
+    echo ">> session: $SESSION_ID" >&2
+    echo ">> profile: $PROFILE_ID" >&2
+
+
+    run_as_user_in_ns "$@"
+}
+
+
+# =============================================================================
+# Root: kill one session
+# =============================================================================
 
 root_kill_session() {
     local id="$1"
 
     resolve_invoking_user
 
+
     [[ "$id" =~ ^[0-9a-f]{8}$ ]] ||
         die "invalid session ID: $id"
+
 
     local user_run_dir="$RUN_BASE/$USER_UID"
     local session_dir="$user_run_dir/$id"
 
+
     [[ -d "$session_dir" ]] ||
         die "session not found: $id"
+
 
     local ns
 
     ns="$(<"$session_dir/namespace")"
 
+
     [[ "$ns" == "conduit-$USER_UID-$id" ]] ||
         die "invalid session state"
+
 
     if is_ns_up "$ns"; then
         kill_namespace_processes "$ns"
@@ -1394,23 +1821,32 @@ root_kill_session() {
             true
     fi
 
+
     rm -rf \
         "/etc/netns/$ns" \
         "$session_dir"
+
 
     echo "session $id stopped"
 }
 
 
+# =============================================================================
+# Root: kill every session owned by the invoking user
+# =============================================================================
+
 root_kill_all() {
     resolve_invoking_user
 
+
     local user_run_dir="$RUN_BASE/$USER_UID"
+
 
     [[ -d "$user_run_dir" ]] || {
         echo "no sessions"
-        return
+        return 0
     }
+
 
     local directory
     local id
@@ -1418,25 +1854,34 @@ root_kill_all() {
 
     local found=0
 
+
     shopt -s nullglob
+
 
     for directory in "$user_run_dir"/*; do
         [[ -d "$directory" ]] || continue
 
+
         id="${directory##*/}"
+
 
         [[ "$id" =~ ^[0-9a-f]{8}$ ]] ||
             continue
 
+
         ns=""
+
 
         [[ -r "$directory/namespace" ]] &&
             ns="$(<"$directory/namespace")"
 
+
         [[ "$ns" == "conduit-$USER_UID-$id" ]] ||
             continue
 
+
         found=1
+
 
         if is_ns_up "$ns"; then
             kill_namespace_processes "$ns"
@@ -1446,33 +1891,40 @@ root_kill_all() {
                 true
         fi
 
+
         rm -rf \
             "/etc/netns/$ns" \
             "$directory"
 
+
         echo "session $id stopped"
     done
 
+
     shopt -u nullglob
+
 
     ((found)) ||
         echo "no sessions"
 }
 
 
-# -----------------------------------------------------------------------------
-# User-side status
-# -----------------------------------------------------------------------------
+# =============================================================================
+# User-side session discovery
+# =============================================================================
 
 load_session_ids() {
     SESSION_IDS=()
 
     local directory
 
+
     [[ -d "$USER_RUN_DIR" ]] ||
-        return
+        return 0
+
 
     shopt -s nullglob
+
 
     for directory in "$USER_RUN_DIR"/*; do
         [[ -d "$directory" ]] || continue
@@ -1480,31 +1932,47 @@ load_session_ids() {
         SESSION_IDS+=("${directory##*/}")
     done
 
+
     shopt -u nullglob
+
+
+    return 0
 }
 
+
+# =============================================================================
+# User-side status
+# =============================================================================
 
 show_status() {
     load_session_ids
 
+
     if ((${#SESSION_IDS[@]} == 0)); then
-        echo "Conduit: no active sessions"
-        return
+        echo "Conduit: no sessions"
+        return 0
     fi
 
-    printf '%-10s %-18s %-35s %-8s %s\n' \
+
+    printf '%-10s %-8s %-16s %-31s %-6s %-5s %s\n' \
         "SESSION" \
+        "STATE" \
         "APP" \
         "PROFILE" \
         "MTU" \
+        "PIDS" \
         "NAMESPACE"
 
-    printf '%-10s %-18s %-35s %-8s %s\n' \
+
+    printf '%-10s %-8s %-16s %-31s %-6s %-5s %s\n' \
         "--------" \
-        "----------------" \
-        "---------------------------------" \
         "------" \
-        "------------------------------"
+        "--------------" \
+        "-----------------------------" \
+        "----" \
+        "----" \
+        "----------------------------"
+
 
     local id
     local dir
@@ -1512,6 +1980,9 @@ show_status() {
     local profile
     local mtu
     local ns
+    local state
+    local pids
+
 
     for id in "${SESSION_IDS[@]}"; do
         dir="$USER_RUN_DIR/$id"
@@ -1520,6 +1991,7 @@ show_status() {
         profile="?"
         mtu="?"
         ns="?"
+
 
         [[ -r "$dir/app" ]] &&
             app="$(<"$dir/app")"
@@ -1533,32 +2005,48 @@ show_status() {
         [[ -r "$dir/namespace" ]] &&
             ns="$(<"$dir/namespace")"
 
-        printf '%-10s %-18s %-35s %-8s %s\n' \
+
+        if [[ "$ns" != "?" ]] && is_ns_up "$ns"; then
+            state="active"
+            pids="$(namespace_pid_count "$ns")"
+        else
+            state="stale"
+            pids="0"
+        fi
+
+
+        printf '%-10s %-8s %-16s %-31s %-6s %-5s %s\n' \
             "$id" \
+            "$state" \
             "$app" \
             "$profile" \
             "$mtu" \
+            "$pids" \
             "$ns"
     done
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # User-side profile listing
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 show_profiles() {
     load_all_profiles
 
+
     ((${#ALL_PROFILES[@]} > 0)) ||
         die "no profiles found under $PROFILE_DIR"
+
 
     local last=""
 
     [[ -r "$LAST_STATE" ]] &&
         last="$(<"$LAST_STATE")"
 
+
     declare -A active_count=()
+
 
     local state
     local profile
@@ -1566,30 +2054,38 @@ show_profiles() {
     local id
     local marks
 
+
     shopt -s nullglob
+
 
     for state in "$USER_RUN_DIR"/*/profile; do
         [[ -r "$state" ]] || continue
 
         profile="$(<"$state")"
 
-        active_count["$profile"]=$(
+        active_count["$profile"]="$(
             ((${active_count["$profile"]:-0} + 1))
-        )
+        )"
     done
+
 
     shopt -u nullglob
 
+
     for file in "${ALL_PROFILES[@]}"; do
         id="$(profile_id "$file")"
+
         marks=""
+
 
         [[ "$id" == "$last" ]] &&
             marks+=" [last]"
 
+
         if [[ "${active_count["$id"]:-0}" -gt 0 ]]; then
             marks+=" [active:${active_count["$id"]}]"
         fi
+
 
         printf '  %s%s\n' \
             "$id" \
@@ -1598,28 +2094,32 @@ show_profiles() {
 }
 
 
-# -----------------------------------------------------------------------------
-# User-side kill selector
-# -----------------------------------------------------------------------------
+# =============================================================================
+# User-side session selector
+# =============================================================================
 
 resolve_session_selector() {
     local selector="${1:-}"
 
+
     load_session_ids
 
+
     if ((${#SESSION_IDS[@]} == 0)); then
-        die "no active sessions"
+        die "no Conduit sessions"
     fi
 
-    # No selector: convenient when exactly one tunnel exists.
+
+    # No selector is allowed when exactly one session exists.
     if [[ -z "$selector" ]]; then
         if ((${#SESSION_IDS[@]} == 1)); then
             printf '%s\n' "${SESSION_IDS[0]}"
-            return
+            return 0
         fi
 
+
         echo \
-            "conduit: multiple sessions are active; specify one:" \
+            "conduit: multiple sessions are active; choose one:" \
             >&2
 
         show_status >&2
@@ -1627,25 +2127,40 @@ resolve_session_selector() {
         exit 1
     fi
 
+
     local id
     local dir
     local app
+    local profile
+    local profile_base
 
     local -a matches=()
 
     declare -A seen=()
 
+
     for id in "${SESSION_IDS[@]}"; do
         dir="$USER_RUN_DIR/$id"
 
         app=""
+        profile=""
+
 
         [[ -r "$dir/app" ]] &&
             app="$(<"$dir/app")"
 
+        [[ -r "$dir/profile" ]] &&
+            profile="$(<"$dir/profile")"
+
+
+        profile_base="${profile##*/}"
+
+
         if [[ "$id" == "$selector" ||
               "$id" == "$selector"* ||
-              "$app" == "$selector" ]]; then
+              "$app" == "$selector" ||
+              "$profile" == "$selector" ||
+              "$profile_base" == "$selector" ]]; then
 
             if [[ -z "${seen["$id"]:-}" ]]; then
                 matches+=("$id")
@@ -1654,72 +2169,184 @@ resolve_session_selector() {
         fi
     done
 
+
     if ((${#matches[@]} == 1)); then
         printf '%s\n' "${matches[0]}"
-        return
+        return 0
     fi
+
 
     if ((${#matches[@]} == 0)); then
         die "session not found: $selector"
     fi
 
+
     echo "conduit: ambiguous session '$selector':" >&2
+
 
     for id in "${matches[@]}"; do
         printf '  %s\n' "$id" >&2
     done
 
+
     exit 1
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
+# User-side launch mode
+# =============================================================================
+
+resolve_detach_mode() {
+    local requested="$1"
+    local executable="${2##*/}"
+
+
+    case "$requested" in
+        foreground)
+            printf '0\n'
+            ;;
+
+        detach)
+            printf '1\n'
+            ;;
+
+        auto)
+            case "$executable" in
+                bash|sh|zsh|fish)
+                    printf '0\n'
+                    ;;
+
+                *)
+                    printf '1\n'
+                    ;;
+            esac
+            ;;
+
+        *)
+            die "invalid detach mode"
+            ;;
+    esac
+}
+
+
+# =============================================================================
 # User frontend
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 frontend_main() {
     case "${1:-}" in
         -h|--help)
             usage
-            return
+            return 0
             ;;
+
 
         show-vpn)
             show_profiles
-            return
+            return 0
             ;;
+
 
         status)
             show_status
-            return
+            return 0
             ;;
+
+
+        attach)
+            shift
+
+            local attach_selector=""
+            local attach_target=""
+
+            # First argument is the target unless omitted.
+            if (($# > 0)); then
+                attach_selector="$1"
+                shift
+            fi
+
+
+            attach_target="$(
+                resolve_session_selector "$attach_selector"
+            )"
+
+
+            # No command => attach the user's normal shell.
+            if (($# == 0)); then
+                set -- "${SHELL:-/bin/sh}"
+            fi
+
+
+            run_elevated \
+                --_root-attach \
+                "$attach_target" \
+                -- \
+                "$@"
+
+            return $?
+            ;;
+
+
+        logs)
+            shift
+
+            local log_target
+
+            log_target="$(
+                resolve_session_selector "${1:-}"
+            )"
+
+
+            local log_file="$USER_RUN_DIR/$log_target/log"
+
+
+            [[ -f "$log_file" ]] ||
+                die "no detached log for session: $log_target"
+
+
+            if command -v tail >/dev/null 2>&1; then
+                tail -f "$log_file"
+            else
+                cat "$log_file"
+            fi
+
+            return $?
+            ;;
+
 
         kill)
             shift
+
 
             if [[ "${1:-}" == "--all" ]]; then
                 run_elevated \
                     --_root-kill-all
 
-                return
+                return $?
             fi
 
-            local target
 
-            target="$(
+            local kill_target
+
+            kill_target="$(
                 resolve_session_selector "${1:-}"
             )"
 
+
             run_elevated \
                 --_root-kill \
-                "$target"
+                "$kill_target"
 
-            return
+            return $?
             ;;
     esac
 
+
     local vpn_arg=""
     local provider_arg=""
+    local requested_mode="auto"
+
 
     while (($# > 0)); do
         case "$1" in
@@ -1728,40 +2355,65 @@ frontend_main() {
                     die "--vpn requires a value"
 
                 vpn_arg="$2"
+
                 shift 2
                 ;;
 
+
             --vpn=*)
                 vpn_arg="${1#*=}"
+
                 shift
                 ;;
+
 
             --provider)
                 (($# >= 2)) ||
                     die "--provider requires a value"
 
                 provider_arg="$2"
+
                 shift 2
                 ;;
 
+
             --provider=*)
                 provider_arg="${1#*=}"
+
                 shift
                 ;;
 
+
+            -d|--detach)
+                requested_mode="detach"
+
+                shift
+                ;;
+
+
+            -f|--foreground)
+                requested_mode="foreground"
+
+                shift
+                ;;
+
+
             -h|--help)
                 usage
-                return
+                return 0
                 ;;
+
 
             --)
                 shift
                 break
                 ;;
 
+
             -*)
                 die "unknown option: $1"
                 ;;
+
 
             *)
                 break
@@ -1769,26 +2421,41 @@ frontend_main() {
         esac
     done
 
+
     (($# > 0)) || {
         usage >&2
         exit 1
     }
 
+
     select_profile \
         "$vpn_arg" \
         "$provider_arg"
 
+
     local session_id
     local app_label
+    local detach
+
 
     session_id="$(new_session_id)"
 
     app_label="${1##*/}"
     app_label="${app_label//[^A-Za-z0-9._+-]/_}"
 
+
+    detach="$(
+        resolve_detach_mode \
+            "$requested_mode" \
+            "$1"
+    )"
+
+
     write_session_file
 
+
     local rc=0
+
 
     if run_elevated \
         --_root-run \
@@ -1797,6 +2464,7 @@ frontend_main() {
         "$PROFILE_ID" \
         "$SESSION_FILE" \
         "$app_label" \
+        "$detach" \
         -- \
         "$@"
     then
@@ -1805,39 +2473,64 @@ frontend_main() {
         rc=$?
     fi
 
+
     rm -f "$SESSION_FILE"
+
 
     return "$rc"
 }
 
 
-# -----------------------------------------------------------------------------
-# Root internal entry point
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Root internal API
+# =============================================================================
 
 root_main() {
     case "${1:-}" in
         --_root-run)
             shift
 
-            (($# >= 7)) ||
-                die "internal argument error"
+            (($# >= 8)) ||
+                die "internal root-run argument error"
 
             root_run "$@"
             ;;
+
+
+        --_root-supervise)
+            shift
+
+            (($# >= 3)) ||
+                die "internal supervisor argument error"
+
+            root_supervise "$@"
+            ;;
+
+
+        --_root-attach)
+            shift
+
+            (($# >= 3)) ||
+                die "internal attach argument error"
+
+            root_attach "$@"
+            ;;
+
 
         --_root-kill)
             shift
 
             (($# == 1)) ||
-                die "internal argument error"
+                die "internal kill argument error"
 
             root_kill_session "$1"
             ;;
 
+
         --_root-kill-all)
             root_kill_all
             ;;
+
 
         *)
             die \
@@ -1847,9 +2540,9 @@ root_main() {
 }
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Main
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 if ((EUID == 0)); then
     root_main "$@"
