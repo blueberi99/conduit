@@ -72,7 +72,7 @@ fi
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && usage
 
 if [[ $EUID -ne 0 ]]; then
-    exec sudo CONDUIT_DIR="$PROFILE_DIR" "$0" "$@"
+    exec sudo "$0" "$@"
 fi
 
 PROFILE_ARG=""
