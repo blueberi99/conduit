@@ -11,6 +11,8 @@ set -euo pipefail
 # Global configuration
 # =============================================================================
 
+VERSION="3.0.0"
+
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 
 PROFILE_DIR="${CONDUIT_DIR:-$HOME/vpns}"
@@ -25,6 +27,22 @@ USER_STATE_DIR="$STATE_BASE/$LOCAL_UID"
 LAST_STATE="$USER_STATE_DIR/last-profile"
 
 
+# -----------------------------------------------------------------------------
+# Cloudflare WARP bootstrap
+# -----------------------------------------------------------------------------
+
+WARP_API_URL="${CONDUIT_WARP_API_URL:-https://api.cloudflareclient.com/v0a737/reg}"
+
+WARP_DNS="${CONDUIT_WARP_DNS:-1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001}"
+
+WARP_MTU="${CONDUIT_WARP_MTU:-1280}"
+
+WARP_ALLOWED_IPS="${CONDUIT_WARP_ALLOWED_IPS:-0.0.0.0/0, ::/0}"
+
+WARP_DEVICE_TYPE="${CONDUIT_WARP_DEVICE_TYPE:-Linux}"
+WARP_LOCALE="${CONDUIT_WARP_LOCALE:-en_US}"
+WARP_PERSISTENT_KEEPALIVE="${CONDUIT_WARP_PERSISTENT_KEEPALIVE:-0}"
+
 # =============================================================================
 # Generic helpers
 # =============================================================================
@@ -37,6 +55,8 @@ die() {
 
 usage() {
     cat <<'EOF'
+Conduit - isolated per-application VPN sessions
+
 usage:
   conduit [options] <command> [args...]
 
@@ -45,10 +65,14 @@ options:
   --provider <name>      choose a profile from ~/vpns/<name>/
   -d, --detach           force detached mode
   -f, --foreground       force foreground mode
+  -h, --help             show help
+  -V, --version          show version
 
 management:
   conduit show-vpn
   conduit status
+  conduit doctor
+  conduit bootstrap
 
   conduit attach
   conduit attach <session>
@@ -93,6 +117,11 @@ examples:
 
 override profile directory:
   CONDUIT_DIR=/path/to/profiles conduit discord
+
+If no WireGuard profiles exist, Conduit automatically bootstraps
+a Cloudflare WARP profile under:
+
+  ~/vpns/cloudflare/warp.conf
 
 Each normal launch gets its own isolated network namespace.
 
@@ -176,6 +205,345 @@ load_all_profiles() {
 }
 
 
+# =============================================================================
+# Cloudflare WARP bootstrap
+# =============================================================================
+
+bootstrap_warp_config() {
+    local warp_dir="$PROFILE_DIR/cloudflare"
+    local target="$warp_dir/warp.conf"
+
+    local command
+
+    local private_key=""
+    local public_key=""
+
+    local tos_date
+    local payload
+    local response
+
+    local peer_public_key
+    local interface_ipv4
+    local interface_ipv6
+    local peer_endpoint
+
+    local ipv4_address
+    local ipv6_address=""
+    local address
+
+    local keepalive_line=""
+
+    local tmp=""
+
+    local -a missing=()
+
+
+    if [[ -e "$target" ]]; then
+        echo ">> WARP profile already exists: $target" >&2
+        return 0
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Dependencies
+    # -------------------------------------------------------------------------
+
+    for command in wg curl jq date mktemp; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            missing+=("$command")
+        fi
+    done
+
+
+    if ((${#missing[@]} > 0)); then
+        die \
+            "cannot bootstrap Cloudflare WARP; missing: ${missing[*]}"
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Validate options
+    # -------------------------------------------------------------------------
+
+    [[ "$WARP_MTU" =~ ^[0-9]+$ ]] ||
+        die "invalid WARP MTU: $WARP_MTU"
+
+
+    ((WARP_MTU >= 576 && WARP_MTU <= 65535)) ||
+        die "WARP MTU out of range: $WARP_MTU"
+
+
+    [[ "$WARP_PERSISTENT_KEEPALIVE" =~ ^[0-9]+$ ]] ||
+        die \
+            "invalid WARP persistent keepalive: $WARP_PERSISTENT_KEEPALIVE"
+
+
+    ((WARP_PERSISTENT_KEEPALIVE >= 0 &&
+      WARP_PERSISTENT_KEEPALIVE <= 65535)) ||
+        die \
+            "WARP persistent keepalive out of range"
+
+
+    # -------------------------------------------------------------------------
+    # Directory
+    # -------------------------------------------------------------------------
+
+    if [[ ! -d "$PROFILE_DIR" ]]; then
+        mkdir -p "$PROFILE_DIR"
+        chmod 700 "$PROFILE_DIR"
+    fi
+
+
+    mkdir -p "$warp_dir"
+    chmod 700 "$warp_dir"
+
+    umask 077
+
+
+    echo ">> bootstrapping Cloudflare WARP..." >&2
+
+
+    # -------------------------------------------------------------------------
+    # Generate keypair locally
+    # -------------------------------------------------------------------------
+
+    private_key="$(
+        wg genkey
+    )" || die "failed to generate WireGuard private key"
+
+
+    [[ -n "$private_key" ]] ||
+        die "WireGuard generated an empty private key"
+
+
+    public_key="$(
+        printf '%s\n' "$private_key" |
+            wg pubkey
+    )" || die "failed to derive WireGuard public key"
+
+
+    [[ -n "$public_key" ]] ||
+        die "WireGuard generated an empty public key"
+
+
+    # -------------------------------------------------------------------------
+    # Registration payload
+    # -------------------------------------------------------------------------
+
+    tos_date="$(
+        date -u '+%Y-%m-%dT%H:%M:%S.000+00:00'
+    )"
+
+
+    payload="$(
+        jq -nc \
+            --arg key "$public_key" \
+            --arg tos "$tos_date" \
+            --arg type "$WARP_DEVICE_TYPE" \
+            --arg locale "$WARP_LOCALE" \
+            '{
+                key: $key,
+                install_id: "",
+                warp_enabled: true,
+                tos: $tos,
+                type: $type,
+                locale: $locale
+            }'
+    )"
+
+
+    # -------------------------------------------------------------------------
+    # Register public key
+    # -------------------------------------------------------------------------
+
+    if ! response="$(
+        curl \
+            --silent \
+            --show-error \
+            --fail \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data "$payload" \
+            "$WARP_API_URL"
+    )"; then
+        private_key=""
+        public_key=""
+
+        die "Cloudflare WARP registration failed"
+    fi
+
+
+    # Validate JSON before extracting fields.
+    if ! jq -e \
+        '.config.peers[0].public_key and .config.interface.addresses' \
+        >/dev/null \
+        <<< "$response"
+    then
+        private_key=""
+        public_key=""
+
+        die "invalid response from Cloudflare WARP API"
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Parse response
+    # -------------------------------------------------------------------------
+
+    peer_public_key="$(
+        jq -r \
+            '.config.peers[0].public_key // empty' \
+            <<< "$response"
+    )"
+
+
+    interface_ipv4="$(
+        jq -r \
+            '.config.interface.addresses.v4 // empty' \
+            <<< "$response"
+    )"
+
+
+    interface_ipv6="$(
+        jq -r \
+            '.config.interface.addresses.v6 // empty' \
+            <<< "$response"
+    )"
+
+
+    peer_endpoint="$(
+        jq -r \
+            '.config.peers[0].endpoint.host // empty' \
+            <<< "$response"
+    )"
+
+
+    [[ -n "$peer_public_key" ]] ||
+        die "invalid WARP response: peer public key missing"
+
+
+    [[ -n "$interface_ipv4" ]] ||
+        die "invalid WARP response: IPv4 address missing"
+
+
+    [[ -n "$peer_endpoint" ]] ||
+        die "invalid WARP response: endpoint missing"
+
+
+    # -------------------------------------------------------------------------
+    # Address prefixes
+    # -------------------------------------------------------------------------
+
+    if [[ "$interface_ipv4" == */* ]]; then
+        ipv4_address="$interface_ipv4"
+    else
+        ipv4_address="$interface_ipv4/32"
+    fi
+
+
+    if [[ -n "$interface_ipv6" ]]; then
+        if [[ "$interface_ipv6" == */* ]]; then
+            ipv6_address="$interface_ipv6"
+        else
+            ipv6_address="$interface_ipv6/128"
+        fi
+    fi
+
+
+    address="$ipv4_address"
+
+
+    if [[ -n "$ipv6_address" ]]; then
+        address="$address, $ipv6_address"
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Optional keepalive
+    # -------------------------------------------------------------------------
+
+    if [[ "$WARP_PERSISTENT_KEEPALIVE" != "0" ]]; then
+        keepalive_line="PersistentKeepalive = $WARP_PERSISTENT_KEEPALIVE"
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Write config atomically
+    # -------------------------------------------------------------------------
+
+    tmp="$(
+        mktemp "$warp_dir/.warp.conf.XXXXXX"
+    )"
+
+
+    if ! {
+        {
+            echo "[Interface]"
+            echo "PrivateKey = $private_key"
+            echo "Address = $address"
+            echo "DNS = $WARP_DNS"
+            echo "MTU = $WARP_MTU"
+            echo
+            echo "[Peer]"
+            echo "PublicKey = $peer_public_key"
+            echo "AllowedIPs = $WARP_ALLOWED_IPS"
+            echo "Endpoint = $peer_endpoint"
+
+            if [[ -n "$keepalive_line" ]]; then
+                echo "$keepalive_line"
+            fi
+        } > "$tmp"
+
+        chmod 600 "$tmp"
+
+        mv "$tmp" "$target"
+    }; then
+        rm -f "$tmp"
+
+        private_key=""
+        public_key=""
+
+        die "failed to write WARP profile"
+    fi
+
+
+    private_key=""
+    public_key=""
+    response=""
+    payload=""
+
+
+    echo ">> generated: $target" >&2
+    echo ">> permissions: 600" >&2
+
+    return 0
+}
+
+
+ensure_profiles() {
+    load_all_profiles
+
+
+    if ((${#ALL_PROFILES[@]} == 0)); then
+        echo ">> no VPN profiles found" >&2
+
+        bootstrap_warp_config
+
+        load_all_profiles
+    fi
+
+
+    ((${#ALL_PROFILES[@]} > 0)) ||
+        die "no VPN profiles available"
+}
+
+
+# =============================================================================
+# Provider filtering
+# =============================================================================
+
 filter_provider() {
     local provider="$1"
     local provider_dir="$PROFILE_DIR/$provider"
@@ -185,6 +553,7 @@ filter_provider() {
     local base
 
     CANDIDATES=()
+
 
     # Preferred provider-agnostic structure:
     #
@@ -203,6 +572,7 @@ filter_provider() {
         return 0
     fi
 
+
     # Legacy flat-layout compatibility.
     #
     # PDE* = Proton
@@ -220,6 +590,7 @@ filter_provider() {
             done
             ;;
 
+
         mullvad)
             for file in "${ALL_PROFILES[@]}"; do
                 id="$(profile_id "$file")"
@@ -231,15 +602,21 @@ filter_provider() {
             done
             ;;
 
+
         *)
             die \
                 "provider '$provider' not found; expected directory: $provider_dir"
             ;;
     esac
 
+
     return 0
 }
 
+
+# =============================================================================
+# Profile selection
+# =============================================================================
 
 select_profile() {
     local vpn_arg="$1"
@@ -256,20 +633,21 @@ select_profile() {
     local -a pool=()
     local -a without_last=()
 
-    load_all_profiles
 
-    ((${#ALL_PROFILES[@]} > 0)) ||
-        die "no WireGuard profiles found under $PROFILE_DIR"
+    ensure_profiles
 
 
     if [[ -n "$provider_arg" ]]; then
         [[ "$provider_arg" =~ ^[A-Za-z0-9._-]+$ ]] ||
             die "invalid provider name: $provider_arg"
 
+
         filter_provider "$provider_arg"
+
 
         ((${#CANDIDATES[@]} > 0)) ||
             die "no profiles for provider: $provider_arg"
+
 
         pool=("${CANDIDATES[@]}")
     else
@@ -277,18 +655,24 @@ select_profile() {
     fi
 
 
-    # Explicit profile selection.
+    # -------------------------------------------------------------------------
+    # Explicit profile selection
+    # -------------------------------------------------------------------------
+
     if [[ -n "$vpn_arg" ]]; then
         wanted="$vpn_arg"
+
 
         for file in "${pool[@]}"; do
             id="$(profile_id "$file")"
             base="${file##*/}"
 
+
             if [[ "$id" == "$wanted" ||
                   "$id" == "$wanted.conf" ||
                   "$base" == "$wanted" ||
                   "$base" == "$wanted.conf" ]]; then
+
                 exact+=("$file")
             fi
         done
@@ -297,6 +681,7 @@ select_profile() {
         if ((${#exact[@]} == 1)); then
             CONF="${exact[0]}"
             PROFILE_ID="$(profile_id "$CONF")"
+
             return 0
         fi
 
@@ -317,8 +702,10 @@ select_profile() {
             id="$(profile_id "$file")"
             base="${file##*/}"
 
+
             if [[ "$id" == *"$vpn_arg"* ||
                   "$base" == *"$vpn_arg"* ]]; then
+
                 matches+=("$file")
             fi
         done
@@ -327,6 +714,7 @@ select_profile() {
         if ((${#matches[@]} == 1)); then
             CONF="${matches[0]}"
             PROFILE_ID="$(profile_id "$CONF")"
+
             return 0
         fi
 
@@ -346,9 +734,10 @@ select_profile() {
     fi
 
 
-    # Random profile selection.
-    #
-    # Avoid the previously-used profile when another option exists.
+    # -------------------------------------------------------------------------
+    # Random selection
+    # -------------------------------------------------------------------------
+
     if [[ -r "$LAST_STATE" ]]; then
         last="$(<"$LAST_STATE")"
     fi
@@ -369,6 +758,7 @@ select_profile() {
     CONF="${pool[RANDOM % ${#pool[@]}]}"
     PROFILE_ID="$(profile_id "$CONF")"
 
+
     return 0
 }
 
@@ -383,6 +773,7 @@ new_session_id() {
     local try
     local ns
 
+
     for try in {1..32}; do
         if [[ -r /proc/sys/kernel/random/uuid ]]; then
             uuid="$(</proc/sys/kernel/random/uuid)"
@@ -394,17 +785,24 @@ new_session_id() {
             )"
         fi
 
+
         ns="conduit-$LOCAL_UID-$id"
 
-        [[ ! -e "$USER_RUN_DIR/$id" ]] || continue
+
+        [[ ! -e "$USER_RUN_DIR/$id" ]] ||
+            continue
+
 
         if is_ns_up "$ns"; then
             continue
         fi
 
+
         printf '%s\n' "$id"
+
         return 0
     done
+
 
     die "could not allocate a unique session ID"
 }
@@ -479,6 +877,7 @@ write_session_file() {
     if [[ -n "${XDG_RUNTIME_DIR:-}" &&
           -d "${XDG_RUNTIME_DIR:-}" &&
           -w "${XDG_RUNTIME_DIR:-}" ]]; then
+
         temp_base="$XDG_RUNTIME_DIR"
     else
         temp_base="${TMPDIR:-/tmp}"
@@ -487,9 +886,11 @@ write_session_file() {
 
     umask 077
 
+
     SESSION_FILE="$(
         mktemp "$temp_base/conduit-env.XXXXXX"
     )"
+
 
     chmod 0600 "$SESSION_FILE"
 
@@ -498,8 +899,11 @@ write_session_file() {
         if [[ -v "$key" ]]; then
             value="${!key}"
 
-            # Don't serialize multiline environment values.
-            [[ "$value" == *$'\n'* ]] && continue
+
+            # Never serialize multiline values.
+            [[ "$value" == *$'\n'* ]] &&
+                continue
+
 
             printf '%s=%s\n' \
                 "$key" \
@@ -517,30 +921,38 @@ write_session_file() {
 run_elevated() {
     local elevator="${CONDUIT_ELEVATOR:-auto}"
 
+
     case "$elevator" in
         auto)
             if command -v sudo >/dev/null 2>&1; then
                 sudo -n -- "$SELF" "$@"
+
             elif command -v doas >/dev/null 2>&1; then
                 doas -n "$SELF" "$@"
+
             else
                 die "need sudo or doas for privilege escalation"
             fi
             ;;
 
+
         sudo)
             command -v sudo >/dev/null 2>&1 ||
                 die "sudo not found"
 
+
             sudo -n -- "$SELF" "$@"
             ;;
+
 
         doas)
             command -v doas >/dev/null 2>&1 ||
                 die "doas not found"
 
+
             doas -n "$SELF" "$@"
             ;;
+
 
         *)
             die "unknown CONDUIT_ELEVATOR: $elevator"
@@ -556,15 +968,18 @@ run_elevated() {
 resolve_invoking_user() {
     local passwd_line=""
 
+
     if [[ "${SUDO_UID:-}" =~ ^[0-9]+$ &&
           "${SUDO_UID:-0}" -ne 0 ]]; then
 
         USER_UID="$SUDO_UID"
 
+
     elif [[ -n "${DOAS_USER:-}" &&
             "$DOAS_USER" != "root" ]]; then
 
         USER_UID="$(id -u "$DOAS_USER")"
+
 
     else
         die \
@@ -610,8 +1025,10 @@ resolve_invoking_user() {
     [[ -n "$USER_NAME" ]] ||
         die "cannot resolve invoking username"
 
+
     [[ -n "$USER_HOME" ]] ||
         die "cannot resolve invoking home"
+
 
     [[ -n "$USER_SHELL" ]] ||
         USER_SHELL="/bin/sh"
@@ -635,6 +1052,7 @@ read_session_file() {
     local value
     local owner
 
+
     SESSION_ENV=()
 
     USER_PATH="/usr/local/bin:/usr/bin:/bin"
@@ -655,7 +1073,9 @@ read_session_file() {
 
 
     while IFS= read -r line; do
-        [[ "$line" == *=* ]] || continue
+        [[ "$line" == *=* ]] ||
+            continue
+
 
         key="${line%%=*}"
         value="${line#*=}"
@@ -665,6 +1085,7 @@ read_session_file() {
             PATH)
                 USER_PATH="$value"
                 ;;
+
 
             DISPLAY|\
             WAYLAND_DISPLAY|\
@@ -719,6 +1140,7 @@ config_values() {
     local wanted_key="$1"
     local wanted_section="$2"
     local file="$3"
+
 
     awk \
         -v wanted_key="$wanted_key" \
@@ -776,11 +1198,13 @@ split_config_csv() {
 
     local -a parts=()
 
+
     destination=()
 
 
     while IFS= read -r line; do
         IFS=',' read -r -a parts <<< "$line"
+
 
         for item in "${parts[@]}"; do
             # Trim left.
@@ -788,6 +1212,7 @@ split_config_csv() {
 
             # Trim right.
             item="${item%"${item##*[![:space:]]}"}"
+
 
             [[ -n "$item" ]] &&
                 destination+=("$item")
@@ -809,11 +1234,13 @@ parse_profile() {
         "$CONF" \
         ADDRS
 
+
     split_config_csv \
         "DNS" \
         "Interface" \
         "$CONF" \
         DNS_VALUES
+
 
     split_config_csv \
         "AllowedIPs" \
@@ -823,6 +1250,7 @@ parse_profile() {
 
 
     CONFIG_MTU=""
+
 
     while IFS= read -r CONFIG_MTU; do
         break
@@ -836,6 +1264,7 @@ parse_profile() {
 
     ((${#ADDRS[@]} > 0)) ||
         die "profile has no Address"
+
 
     ((${#ALLOWED_IPS[@]} > 0)) ||
         die "profile has no AllowedIPs"
@@ -861,11 +1290,14 @@ parse_profile() {
 
 
     for value in "${ALLOWED_IPS[@]}"; do
-        [[ "$value" == "0.0.0.0/0" ]] &&
+        if [[ "$value" == "0.0.0.0/0" ]]; then
             FULL_V4=1
+        fi
 
-        [[ "$value" == "::/0" ]] &&
+
+        if [[ "$value" == "::/0" ]]; then
             FULL_V6=1
+        fi
     done
 
 
@@ -893,15 +1325,16 @@ choose_mtu() {
     local dev=""
     local host_mtu=""
 
-    # Respect provider MTU first.
-    #
-    # Cloudflare WARP configs commonly specify MTU=1280.
+
+    # Respect provider/config MTU first.
     if [[ -n "$CONFIG_MTU" ]]; then
         [[ "$CONFIG_MTU" =~ ^[0-9]+$ ]] ||
             die "invalid MTU: $CONFIG_MTU"
 
+
         ((CONFIG_MTU >= 576 && CONFIG_MTU <= 65535)) ||
             die "MTU out of range: $CONFIG_MTU"
+
 
         MTU="$CONFIG_MTU"
 
@@ -910,8 +1343,7 @@ choose_mtu() {
 
 
     # Generic fallback:
-    #
-    # physical/default interface MTU minus WireGuard overhead.
+    # host/default-route interface MTU minus WireGuard overhead.
     dev="$(
         ip -4 route show default 2>/dev/null |
             awk '
@@ -968,6 +1400,7 @@ choose_mtu() {
 write_namespace_etc() {
     mkdir -p "$NETNS_ETC"
 
+
     : > "$NETNS_ETC/resolv.conf"
 
 
@@ -986,6 +1419,7 @@ write_namespace_etc() {
 
             count=$((count + 1))
 
+
         # IPv4 nameserver.
         elif [[ "$dns" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
             printf 'nameserver %s\n' \
@@ -994,6 +1428,7 @@ write_namespace_etc() {
 
             count=$((count + 1))
 
+
         # wg-quick also allows DNS search domains.
         else
             searches+=("$dns")
@@ -1001,7 +1436,7 @@ write_namespace_etc() {
     done
 
 
-    # Safe fallback if the provider supplied no DNS.
+    # Safe fallback if provider supplied no DNS.
     if ((count == 0)); then
         if ((FULL_V4)); then
             echo "nameserver 1.1.1.1" \
@@ -1022,7 +1457,7 @@ write_namespace_etc() {
     fi
 
 
-    # Avoid host-local NSS resolver services inside the VPN namespace.
+    # Avoid host-local resolver services inside the VPN namespace.
     if [[ -r /etc/nsswitch.conf ]]; then
         awk '
             BEGIN {
@@ -1045,6 +1480,7 @@ write_namespace_etc() {
             }
         ' /etc/nsswitch.conf \
             > "$NETNS_ETC/nsswitch.conf"
+
     else
         echo "hosts: files dns" \
             > "$NETNS_ETC/nsswitch.conf"
@@ -1097,6 +1533,7 @@ validate_profile() {
     local owner
     local mode
     local mode_octal
+
 
     CONF="$(readlink -f "$CONF")"
 
@@ -1192,13 +1629,14 @@ prepare_session_state() {
         "$ROOT_LAST_STATE"
 
 
-    # Keep a sanitized copy so `conduit attach` can reuse the desktop session.
+    # Keep a sanitized environment copy for attach/supervisor.
     SESSION_ENV_FILE="$SESSION_DIR/session.env"
+
 
     cat "$SESSION_FILE" > "$SESSION_ENV_FILE"
 
-    chown "$USER_UID:$USER_GID" "$SESSION_ENV_FILE"
 
+    chown "$USER_UID:$USER_GID" "$SESSION_ENV_FILE"
     chmod 0600 "$SESSION_ENV_FILE"
 }
 
@@ -1222,9 +1660,12 @@ kill_namespace_processes() {
 
 
     for pid in "${pids[@]}"; do
-        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        [[ "$pid" =~ ^[0-9]+$ ]] ||
+            continue
 
-        kill -TERM "$pid" 2>/dev/null || true
+
+        kill -TERM "$pid" 2>/dev/null ||
+            true
     done
 
 
@@ -1232,11 +1673,14 @@ kill_namespace_processes() {
     for attempt in 1 2 3; do
         sleep 1
 
+
         pids=()
+
 
         mapfile -t pids < <(
             namespace_pids "$ns"
         )
+
 
         ((${#pids[@]} == 0)) &&
             return 0
@@ -1244,9 +1688,12 @@ kill_namespace_processes() {
 
 
     for pid in "${pids[@]}"; do
-        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        [[ "$pid" =~ ^[0-9]+$ ]] ||
+            continue
 
-        kill -KILL "$pid" 2>/dev/null || true
+
+        kill -KILL "$pid" 2>/dev/null ||
+            true
     done
 }
 
@@ -1257,7 +1704,7 @@ cleanup_current_session() {
         true
 
 
-    # Setup might fail before the temporary host-side WG interface gets moved.
+    # Setup may fail before the temporary interface moves.
     if [[ -n "${WG_HOST:-}" ]]; then
         ip link del "$WG_HOST" \
             2>/dev/null ||
@@ -1276,6 +1723,7 @@ terminate_current_session() {
         kill_namespace_processes "$NS"
     fi
 
+
     cleanup_current_session
 }
 
@@ -1286,6 +1734,7 @@ wait_for_session_empty() {
 
     while is_ns_up "$NS"; do
         pids=()
+
 
         mapfile -t pids < <(
             namespace_pids "$NS"
@@ -1305,11 +1754,12 @@ wait_for_session_empty() {
 
 
 # =============================================================================
-# Run an application as the original user
+# Run application as original user
 # =============================================================================
 
 run_as_user_in_ns() {
     local env_bin
+
 
     env_bin="$(command -v env)"
 
@@ -1357,6 +1807,7 @@ run_as_user_in_ns() {
                 "${SESSION_ENV[@]}" \
                 "$@"
 
+
         return $?
     fi
 
@@ -1374,7 +1825,7 @@ run_as_user_in_ns() {
 
 
 # =============================================================================
-# Root: create one isolated VPN session
+# Root: create isolated VPN session
 # =============================================================================
 
 root_run() {
@@ -1385,6 +1836,7 @@ root_run() {
     APP_LABEL="$5"
     DETACH="$6"
 
+
     shift 6
 
 
@@ -1394,6 +1846,7 @@ root_run() {
 
     [[ "${1:-}" == "--" ]] ||
         die "internal argument error"
+
 
     shift
 
@@ -1407,6 +1860,7 @@ root_run() {
 
 
     APP_LABEL="${APP_LABEL//[^A-Za-z0-9._+-]/_}"
+
 
     [[ -n "$APP_LABEL" ]] ||
         APP_LABEL="app"
@@ -1425,6 +1879,7 @@ root_run() {
     ROOT_STATE_USER_DIR="$STATE_BASE/$USER_UID"
     ROOT_LAST_STATE="$ROOT_STATE_USER_DIR/last-profile"
 
+
     NS="conduit-$USER_UID-$SESSION_ID"
 
     SESSION_DIR="$ROOT_RUN_USER_DIR/$SESSION_ID"
@@ -1438,12 +1893,14 @@ root_run() {
     [[ ! -e "$SESSION_DIR" ]] ||
         die "session already exists: $SESSION_ID"
 
+
     if is_ns_up "$NS"; then
         die "network namespace already exists: $NS"
     fi
 
 
     trap cleanup_current_session EXIT
+
 
     trap '
         terminate_current_session
@@ -1459,17 +1916,14 @@ root_run() {
     ip netns add "$NS"
 
 
-    # Create WireGuard in the host namespace.
-    #
-    # The encrypted UDP socket remains attached to the host namespace after
-    # the interface itself moves into the application namespace.
+    # Create WireGuard in host namespace first.
     ip link add \
         "$WG_HOST" \
         type wireguard
 
 
-    # `wg-quick strip` removes Address/DNS/MTU/hooks but preserves normal
-    # WireGuard interface/peer configuration.
+    # wg-quick strip removes Address/DNS/MTU/hooks.
+    # Endpoint hostname resolution therefore happens from host context.
     wg setconf \
         "$WG_HOST" \
         <(wg-quick strip "$CONF")
@@ -1480,7 +1934,7 @@ root_run() {
         netns "$NS"
 
 
-    # Each network namespace can independently use the name wg0.
+    # Every isolated namespace can independently use wg0.
     ip -n "$NS" \
         link set \
         "$WG_HOST" \
@@ -1514,7 +1968,6 @@ root_run() {
         wg0 up
 
 
-    # Only create protocol families actually covered by AllowedIPs.
     if ((FULL_V4)); then
         ip -n "$NS" \
             route add \
@@ -1532,7 +1985,6 @@ root_run() {
 
 
     write_namespace_etc
-
     prepare_session_state
 
 
@@ -1553,16 +2005,11 @@ root_run() {
 
         : > "$log_file"
 
+
         chown "$USER_UID:$USER_GID" "$log_file"
         chmod 0600 "$log_file"
 
 
-        # The supervisor stays in the host network namespace.
-        #
-        # The application itself will be placed into the VPN namespace.
-        #
-        # setsid gives the supervisor a new session so closing the original
-        # terminal does not kill the VPN/app lifecycle.
         setsid \
             "$SELF" \
             --_root-supervise \
@@ -1586,7 +2033,7 @@ root_run() {
             "$SESSION_DIR/supervisor"
 
 
-        # The detached supervisor now owns lifecycle cleanup.
+        # Supervisor now owns session lifecycle.
         trap - EXIT INT TERM HUP
 
 
@@ -1612,7 +2059,7 @@ root_run() {
     fi
 
 
-    # Electron/browser launchers may exit while children continue running.
+    # GUI launchers may fork and exit while children remain.
     wait_for_session_empty
 
 
@@ -1633,11 +2080,13 @@ root_run() {
 root_supervise() {
     SESSION_ID="$1"
 
+
     shift
 
 
     [[ "${1:-}" == "--" ]] ||
         die "internal supervisor argument error"
+
 
     shift
 
@@ -1716,17 +2165,19 @@ root_supervise() {
 
 
 # =============================================================================
-# Root: attach command/shell to an existing session
+# Root: attach to existing session
 # =============================================================================
 
 root_attach() {
     SESSION_ID="$1"
+
 
     shift
 
 
     [[ "${1:-}" == "--" ]] ||
         die "internal attach argument error"
+
 
     shift
 
@@ -1789,6 +2240,7 @@ root_attach() {
 root_kill_session() {
     local id="$1"
 
+
     resolve_invoking_user
 
 
@@ -1806,6 +2258,7 @@ root_kill_session() {
 
     local ns
 
+
     ns="$(<"$session_dir/namespace")"
 
 
@@ -1815,6 +2268,7 @@ root_kill_session() {
 
     if is_ns_up "$ns"; then
         kill_namespace_processes "$ns"
+
 
         ip netns del "$ns" \
             2>/dev/null ||
@@ -1832,7 +2286,7 @@ root_kill_session() {
 
 
 # =============================================================================
-# Root: kill every session owned by the invoking user
+# Root: kill all invoking-user sessions
 # =============================================================================
 
 root_kill_all() {
@@ -1859,7 +2313,8 @@ root_kill_all() {
 
 
     for directory in "$user_run_dir"/*; do
-        [[ -d "$directory" ]] || continue
+        [[ -d "$directory" ]] ||
+            continue
 
 
         id="${directory##*/}"
@@ -1886,6 +2341,7 @@ root_kill_all() {
         if is_ns_up "$ns"; then
             kill_namespace_processes "$ns"
 
+
             ip netns del "$ns" \
                 2>/dev/null ||
                 true
@@ -1904,8 +2360,308 @@ root_kill_all() {
     shopt -u nullglob
 
 
-    ((found)) ||
+    if ((found == 0)); then
         echo "no sessions"
+    fi
+}
+
+
+# =============================================================================
+# Doctor helpers
+# =============================================================================
+
+doctor_ok() {
+    printf '[OK]   %s\n' "$1"
+}
+
+
+doctor_warn() {
+    printf '[WARN] %s\n' "$1"
+}
+
+
+doctor_fail() {
+    printf '[FAIL] %s\n' "$1"
+}
+
+
+# =============================================================================
+# Root: doctor self-test
+# =============================================================================
+
+root_doctor() {
+    resolve_invoking_user
+    check_root_dependencies
+
+
+    local id
+    local ns
+    local wgdev
+
+
+    id="$(
+        printf '%08x' \
+            "$(( (RANDOM << 16) | RANDOM ))"
+    )"
+
+
+    ns="conduit-doctor-$USER_UID-$id"
+    wgdev="cwd${id:0:8}"
+
+
+    trap '
+        ip link del "$wgdev" 2>/dev/null || true
+        ip netns del "$ns" 2>/dev/null || true
+    ' EXIT INT TERM HUP
+
+
+    if ! ip netns add "$ns"; then
+        doctor_fail "network namespace creation"
+        return 1
+    fi
+
+
+    doctor_ok "network namespace creation"
+
+
+    if ! ip link add "$wgdev" type wireguard; then
+        doctor_fail "WireGuard kernel interface"
+        return 1
+    fi
+
+
+    doctor_ok "WireGuard kernel interface"
+
+
+    ip link del "$wgdev"
+    ip netns del "$ns"
+
+
+    trap - EXIT INT TERM HUP
+
+
+    doctor_ok "privilege escalation"
+
+
+    return 0
+}
+
+
+# =============================================================================
+# User-side doctor
+# =============================================================================
+
+doctor() {
+    local failures=0
+    local command
+
+    local owner
+    local mode
+    local mode_octal
+
+    local profiles=0
+    local insecure=0
+
+    local file
+
+
+    echo "Conduit $VERSION"
+    echo "Doctor"
+    echo
+
+
+    # -------------------------------------------------------------------------
+    # Core commands
+    # -------------------------------------------------------------------------
+
+    local -a required=(
+        bash
+        ip
+        wg
+        wg-quick
+        awk
+        stat
+        env
+        setsid
+        find
+        date
+        mktemp
+        readlink
+    )
+
+
+    for command in "${required[@]}"; do
+        if command -v "$command" >/dev/null 2>&1; then
+            doctor_ok "$command"
+        else
+            doctor_fail "$command"
+            failures=$((failures + 1))
+        fi
+    done
+
+
+    # -------------------------------------------------------------------------
+    # Privilege drop
+    # -------------------------------------------------------------------------
+
+    if command -v setpriv >/dev/null 2>&1; then
+        doctor_ok "setpriv"
+
+    elif command -v runuser >/dev/null 2>&1; then
+        doctor_ok "runuser"
+
+    else
+        doctor_fail "setpriv/runuser"
+        failures=$((failures + 1))
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Privilege elevation
+    # -------------------------------------------------------------------------
+
+    if command -v sudo >/dev/null 2>&1; then
+        doctor_ok "sudo"
+
+    elif command -v doas >/dev/null 2>&1; then
+        doctor_ok "doas"
+
+    else
+        doctor_fail "sudo/doas"
+        failures=$((failures + 1))
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # WARP bootstrap dependencies
+    # -------------------------------------------------------------------------
+
+    if command -v curl >/dev/null 2>&1; then
+        doctor_ok "curl (WARP bootstrap)"
+    else
+        doctor_fail "curl (WARP bootstrap)"
+        failures=$((failures + 1))
+    fi
+
+
+    if command -v jq >/dev/null 2>&1; then
+        doctor_ok "jq (WARP bootstrap)"
+    else
+        doctor_fail "jq (WARP bootstrap)"
+        failures=$((failures + 1))
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Desktop session
+    # -------------------------------------------------------------------------
+
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+        doctor_ok "Wayland session"
+
+    elif [[ -n "${DISPLAY:-}" ]]; then
+        doctor_ok "X11 session"
+
+    else
+        doctor_warn \
+            "no graphical session detected; CLI use is still available"
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Profile validation
+    # -------------------------------------------------------------------------
+
+    load_all_profiles
+
+
+    for file in "${ALL_PROFILES[@]}"; do
+        profiles=$((profiles + 1))
+
+
+        owner="$(
+            stat -Lc '%u' "$file" 2>/dev/null ||
+                true
+        )"
+
+
+        mode="$(
+            stat -Lc '%a' "$file" 2>/dev/null ||
+                true
+        )"
+
+
+        if [[ "$owner" != "$LOCAL_UID" ]]; then
+            doctor_fail \
+                "wrong profile owner: $(profile_id "$file")"
+
+            insecure=$((insecure + 1))
+
+            continue
+        fi
+
+
+        if [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+            mode_octal=$((8#$mode))
+
+
+            if ((mode_octal & 077)); then
+                doctor_fail \
+                    "insecure profile permissions: $(profile_id "$file") ($mode)"
+
+                insecure=$((insecure + 1))
+            fi
+
+        else
+            doctor_fail \
+                "cannot inspect profile: $(profile_id "$file")"
+
+            insecure=$((insecure + 1))
+        fi
+    done
+
+
+    if ((profiles > 0)); then
+        doctor_ok "$profiles VPN profile(s)"
+    else
+        doctor_warn \
+            "no VPN profiles; first launch will bootstrap Cloudflare WARP"
+    fi
+
+
+    if ((insecure > 0)); then
+        failures=$((failures + insecure))
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # Privileged kernel/network test
+    # -------------------------------------------------------------------------
+
+    echo
+
+
+    if run_elevated --_root-doctor; then
+        :
+    else
+        doctor_fail "privileged Conduit self-test"
+        failures=$((failures + 1))
+    fi
+
+
+    echo
+
+
+    if ((failures == 0)); then
+        echo "Conduit is ready."
+        return 0
+    fi
+
+
+    echo "Conduit found $failures problem(s)."
+
+
+    return 1
 }
 
 
@@ -1927,7 +2683,9 @@ load_session_ids() {
 
 
     for directory in "$USER_RUN_DIR"/*; do
-        [[ -d "$directory" ]] || continue
+        [[ -d "$directory" ]] ||
+            continue
+
 
         SESSION_IDS+=("${directory##*/}")
     done
@@ -1976,16 +2734,19 @@ show_status() {
 
     local id
     local dir
+
     local app
     local profile
     local mtu
     local ns
+
     local state
     local pids
 
 
     for id in "${SESSION_IDS[@]}"; do
         dir="$USER_RUN_DIR/$id"
+
 
         app="?"
         profile="?"
@@ -1996,19 +2757,25 @@ show_status() {
         [[ -r "$dir/app" ]] &&
             app="$(<"$dir/app")"
 
+
         [[ -r "$dir/profile" ]] &&
             profile="$(<"$dir/profile")"
 
+
         [[ -r "$dir/mtu" ]] &&
             mtu="$(<"$dir/mtu")"
+
 
         [[ -r "$dir/namespace" ]] &&
             ns="$(<"$dir/namespace")"
 
 
-        if [[ "$ns" != "?" ]] && is_ns_up "$ns"; then
+        if [[ "$ns" != "?" ]] &&
+           is_ns_up "$ns"; then
+
             state="active"
             pids="$(namespace_pid_count "$ns")"
+
         else
             state="stale"
             pids="0"
@@ -2032,14 +2799,11 @@ show_status() {
 # =============================================================================
 
 show_profiles() {
-    load_all_profiles
-
-
-    ((${#ALL_PROFILES[@]} > 0)) ||
-        die "no profiles found under $PROFILE_DIR"
+    ensure_profiles
 
 
     local last=""
+
 
     [[ -r "$LAST_STATE" ]] &&
         last="$(<"$LAST_STATE")"
@@ -2059,9 +2823,12 @@ show_profiles() {
 
 
     for state in "$USER_RUN_DIR"/*/profile; do
-        [[ -r "$state" ]] || continue
+        [[ -r "$state" ]] ||
+            continue
+
 
         profile="$(<"$state")"
+
 
         active_count["$profile"]="$(
             ((${active_count["$profile"]:-0} + 1))
@@ -2110,7 +2877,7 @@ resolve_session_selector() {
     fi
 
 
-    # No selector is allowed when exactly one session exists.
+    # No selector is allowed if exactly one session exists.
     if [[ -z "$selector" ]]; then
         if ((${#SESSION_IDS[@]} == 1)); then
             printf '%s\n' "${SESSION_IDS[0]}"
@@ -2122,7 +2889,9 @@ resolve_session_selector() {
             "conduit: multiple sessions are active; choose one:" \
             >&2
 
+
         show_status >&2
+
 
         exit 1
     fi
@@ -2130,6 +2899,7 @@ resolve_session_selector() {
 
     local id
     local dir
+
     local app
     local profile
     local profile_base
@@ -2142,12 +2912,14 @@ resolve_session_selector() {
     for id in "${SESSION_IDS[@]}"; do
         dir="$USER_RUN_DIR/$id"
 
+
         app=""
         profile=""
 
 
         [[ -r "$dir/app" ]] &&
             app="$(<"$dir/app")"
+
 
         [[ -r "$dir/profile" ]] &&
             profile="$(<"$dir/profile")"
@@ -2161,6 +2933,7 @@ resolve_session_selector() {
               "$app" == "$selector" ||
               "$profile" == "$selector" ||
               "$profile_base" == "$selector" ]]; then
+
 
             if [[ -z "${seen["$id"]:-}" ]]; then
                 matches+=("$id")
@@ -2207,9 +2980,11 @@ resolve_detach_mode() {
             printf '0\n'
             ;;
 
+
         detach)
             printf '1\n'
             ;;
+
 
         auto)
             case "$executable" in
@@ -2222,6 +2997,7 @@ resolve_detach_mode() {
                     ;;
             esac
             ;;
+
 
         *)
             die "invalid detach mode"
@@ -2242,14 +3018,64 @@ frontend_main() {
             ;;
 
 
+        -V|--version|version)
+            echo "conduit $VERSION"
+            return 0
+            ;;
+
+
+        bootstrap)
+            shift
+
+
+            (($# == 0)) ||
+                die "usage: conduit bootstrap"
+
+
+            bootstrap_warp_config
+
+            return 0
+            ;;
+
+
+        doctor)
+            shift
+
+
+            (($# == 0)) ||
+                die "usage: conduit doctor"
+
+
+            doctor
+
+            return $?
+            ;;
+
+
         show-vpn)
+            shift
+
+
+            (($# == 0)) ||
+                die "usage: conduit show-vpn"
+
+
             show_profiles
+
             return 0
             ;;
 
 
         status)
+            shift
+
+
+            (($# == 0)) ||
+                die "usage: conduit status"
+
+
             show_status
+
             return 0
             ;;
 
@@ -2257,10 +3083,12 @@ frontend_main() {
         attach)
             shift
 
+
             local attach_selector=""
             local attach_target=""
 
-            # First argument is the target unless omitted.
+
+            # First arg is target unless omitted.
             if (($# > 0)); then
                 attach_selector="$1"
                 shift
@@ -2272,7 +3100,7 @@ frontend_main() {
             )"
 
 
-            # No command => attach the user's normal shell.
+            # No command => attach user's normal shell.
             if (($# == 0)); then
                 set -- "${SHELL:-/bin/sh}"
             fi
@@ -2284,6 +3112,7 @@ frontend_main() {
                 -- \
                 "$@"
 
+
             return $?
             ;;
 
@@ -2291,7 +3120,14 @@ frontend_main() {
         logs)
             shift
 
+
             local log_target
+
+
+            if (($# > 1)); then
+                die "usage: conduit logs [session]"
+            fi
+
 
             log_target="$(
                 resolve_session_selector "${1:-}"
@@ -2311,6 +3147,7 @@ frontend_main() {
                 cat "$log_file"
             fi
 
+
             return $?
             ;;
 
@@ -2320,14 +3157,24 @@ frontend_main() {
 
 
             if [[ "${1:-}" == "--all" ]]; then
+                (($# == 1)) ||
+                    die "usage: conduit kill --all"
+
+
                 run_elevated \
                     --_root-kill-all
+
 
                 return $?
             fi
 
 
+            (($# <= 1)) ||
+                die "usage: conduit kill <session>"
+
+
             local kill_target
+
 
             kill_target="$(
                 resolve_session_selector "${1:-}"
@@ -2338,10 +3185,15 @@ frontend_main() {
                 --_root-kill \
                 "$kill_target"
 
+
             return $?
             ;;
     esac
 
+
+    # -------------------------------------------------------------------------
+    # Normal launch
+    # -------------------------------------------------------------------------
 
     local vpn_arg=""
     local provider_arg=""
@@ -2354,7 +3206,9 @@ frontend_main() {
                 (($# >= 2)) ||
                     die "--vpn requires a value"
 
+
                 vpn_arg="$2"
+
 
                 shift 2
                 ;;
@@ -2371,7 +3225,9 @@ frontend_main() {
                 (($# >= 2)) ||
                     die "--provider requires a value"
 
+
                 provider_arg="$2"
+
 
                 shift 2
                 ;;
@@ -2398,14 +3254,23 @@ frontend_main() {
                 ;;
 
 
+            -V|--version)
+                echo "conduit $VERSION"
+
+                return 0
+                ;;
+
+
             -h|--help)
                 usage
+
                 return 0
                 ;;
 
 
             --)
                 shift
+
                 break
                 ;;
 
@@ -2439,6 +3304,7 @@ frontend_main() {
 
 
     session_id="$(new_session_id)"
+
 
     app_label="${1##*/}"
     app_label="${app_label//[^A-Za-z0-9._+-]/_}"
@@ -2490,8 +3356,10 @@ root_main() {
         --_root-run)
             shift
 
+
             (($# >= 8)) ||
                 die "internal root-run argument error"
+
 
             root_run "$@"
             ;;
@@ -2500,8 +3368,10 @@ root_main() {
         --_root-supervise)
             shift
 
+
             (($# >= 3)) ||
                 die "internal supervisor argument error"
+
 
             root_supervise "$@"
             ;;
@@ -2510,8 +3380,10 @@ root_main() {
         --_root-attach)
             shift
 
+
             (($# >= 3)) ||
                 die "internal attach argument error"
+
 
             root_attach "$@"
             ;;
@@ -2520,15 +3392,36 @@ root_main() {
         --_root-kill)
             shift
 
+
             (($# == 1)) ||
                 die "internal kill argument error"
+
 
             root_kill_session "$1"
             ;;
 
 
         --_root-kill-all)
+            shift
+
+
+            (($# == 0)) ||
+                die "internal kill-all argument error"
+
+
             root_kill_all
+            ;;
+
+
+        --_root-doctor)
+            shift
+
+
+            (($# == 0)) ||
+                die "internal doctor argument error"
+
+
+            root_doctor
             ;;
 
 

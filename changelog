@@ -1,0 +1,136 @@
+# changelog
+
+# Conduit v3.0.0
+
+Conduit v3 marks the completion of the new isolated-session architecture and turns Conduit into a complete install-and-run tool rather than a standalone network namespace script.
+
+## Architecture
+
+- Every application launch now receives its own isolated Linux network namespace
+- Every session has its own WireGuard interface, routes, DNS configuration, state, and lifecycle
+- Multiple Conduit sessions can run simultaneously without affecting each other
+- Different applications can use different VPN providers and profiles at the same time
+- Temporary host-side WireGuard interfaces use unique names to avoid concurrent launch collisions
+- WireGuard interfaces are renamed to `wg0` after entering their destination namespace
+- The host routing table remains untouched
+
+## Session management
+
+- GUI applications now launch detached from the terminal by default
+- Interactive shells remain foreground by default
+- Added `-d` / `--detach`
+- Added `-f` / `--foreground`
+- Added `conduit status`
+- Added `conduit attach`
+- Added `conduit attach <session> <command>`
+- Added `conduit logs <session>`
+- Added `conduit kill <session>`
+- Added `conduit kill --all`
+- Sessions can be selected using their full ID, unique ID prefix, application name, or profile
+- Detached sessions use a lifecycle supervisor so closing the launching terminal does not terminate the VPN session
+- Session cleanup waits for application descendants that survive their original launcher process
+
+## VPN and profile support
+
+- Added Cloudflare WARP WireGuard support
+- Added automatic Cloudflare WARP profile bootstrap when no VPN profiles exist
+- Added `conduit bootstrap`
+- WARP WireGuard keypairs are generated locally
+- Generated WARP profiles are stored using secure `0600` permissions
+- Added dual-stack IPv4/IPv6 routing
+- Added support for multiple comma-separated interface addresses
+- Added support for multiple IPv4 and IPv6 DNS servers
+- WireGuard profile MTU values are respected
+- Cloudflare WARP `MTU = 1280` configurations are supported
+- Added provider directory layout:
+
+```text
+~/vpns/proton/
+~/vpns/mullvad/
+~/vpns/cloudflare/
+```
+
+- Arbitrary provider directories are supported
+- Legacy flat Proton/Mullvad profile layouts remain supported
+- Random profile selection avoids the previously used profile when possible
+- VPN configuration files are validated for secure ownership and permissions
+
+## DNS
+
+- Added per-network-namespace DNS configuration
+- Each session receives its own `resolv.conf`
+- Each session receives a namespace-specific `nsswitch.conf`
+- Host-local resolver integrations are prevented from bypassing the VPN DNS path
+- Host resolver configuration is not modified
+
+## Desktop integration
+
+- Removed KDE/Plasma-specific session discovery
+- Desktop environment variables are captured generically before privilege escalation
+- Added support for Wayland and X11 session variables
+- Added PipeWire, PulseAudio, D-Bus, portal, Qt, GTK, SDL, and common desktop environment variables
+- Conduit no longer depends on a running `plasmashell` process
+
+## Privilege handling
+
+- Removed the previous `SETENV` sudo requirement
+- Conduit now passes only a restricted allowlist of desktop environment variables
+- Applications are dropped back to the invoking desktop user before execution
+- `setpriv` is preferred with `runuser` available as a fallback
+- Non-interactive privilege escalation prevents detached applications from hanging on password prompts
+
+## Diagnostics
+
+- Added `conduit doctor`
+- Added dependency diagnostics
+- Added profile ownership and permission checks
+- Added network namespace creation test
+- Added WireGuard kernel interface test
+- Added desktop session detection
+- Added privilege escalation diagnostics
+- Added `conduit --version`
+
+## Installation
+
+- Added distro-agnostic `install.sh`
+- Installer validates Bash syntax before installation
+- Installer checks required capabilities instead of detecting distributions
+- Installer installs `/usr/local/bin/conduit` as a root-owned executable
+- Installer creates and validates `/etc/sudoers.d/conduit`
+- Installer prepares the profile directory securely
+- Installer automatically bootstraps Cloudflare WARP when no profiles exist
+- Installer runs `conduit doctor` after installation
+- Installation failures are designed to roll back system-level changes
+
+## Uninstallation
+
+- Added `uninstall.sh`
+- Active Conduit sessions are stopped before removal
+- Conduit-owned network namespaces and runtime state are cleaned up
+- The installed binary and sudoers rule are removed
+- User VPN profiles are deliberately preserved
+
+## Breaking changes from the original architecture
+
+The old design used a single shared `conduit` network namespace.
+
+Conduit v3 replaces it with independent per-session namespaces such as:
+
+```text
+conduit-1000-a13f3c21
+conduit-1000-b82e21ac
+```
+
+Closing one application no longer tears down unrelated Conduit applications.
+
+Commands based on the old global-tunnel lifecycle should be replaced with the new session management interface:
+
+```bash
+conduit status
+conduit attach <session>
+conduit logs <session>
+conduit kill <session>
+conduit kill --all
+```
+
+This release supersedes the original single-namespace Conduit design.
