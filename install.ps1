@@ -99,6 +99,10 @@ function Confirm-WireSockTerms {
 }
 
 function Protect-ConduitStateDirectory {
+    $securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+    if ($null -eq (Get-Module -Name 'Microsoft.PowerShell.Security')) {
+        Import-Module -Name $securityModule -ErrorAction Stop
+    }
     foreach ($path in @($stateDirectory, (Join-Path $stateDirectory 'sessions'))) {
         New-Item -ItemType Directory -Path $path -Force | Out-Null
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User

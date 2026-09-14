@@ -14,6 +14,8 @@
   code zero, and include stdout in tunnel-startup errors
 - Avoid redundant ACL rewrites when a directory already inherits an ACL
   restricted to the current user and LocalSystem
+- Load the matching PowerShell security module by absolute path so the CMD
+  launcher also hardens ACLs when invoked from a PowerShell 7 terminal
 
 # Conduit v3.2.0
 

@@ -81,6 +81,13 @@ function Protect-ConduitDirectory {
     # Build the full ACL in memory first: if Set-Acl is unavailable (for
     # example, on a non-NTFS volume), the existing usable ACL remains intact.
     try {
+        # PowerShell 7 terminals can pass their PSModulePath to the Windows
+        # PowerShell process started by conduit.cmd. Import the matching inbox
+        # security module by absolute path instead of relying on auto-loading.
+        $securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+        if ($null -eq (Get-Module -Name 'Microsoft.PowerShell.Security')) {
+            Import-Module -Name $securityModule -ErrorAction Stop
+        }
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
         $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
@@ -134,7 +141,11 @@ function Protect-ConduitDirectory {
         Set-Acl -LiteralPath $Path -AclObject $acl
     }
     catch {
-        Write-Warning "Could not harden ACLs on $Path"
+        $details = ''
+        if ([Environment]::GetEnvironmentVariable('CONDUIT_DEBUG') -eq '1') {
+            $details = ": $($_.Exception.Message)"
+        }
+        Write-Warning "Could not harden ACLs on $Path$details"
     }
 }
 
