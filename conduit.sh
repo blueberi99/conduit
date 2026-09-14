@@ -11,7 +11,7 @@ set -euo pipefail
 # Global configuration
 # =============================================================================
 
-VERSION="3.0.0"
+VERSION="3.2.0"
 
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 
@@ -31,7 +31,7 @@ LAST_STATE="$USER_STATE_DIR/last-profile"
 # Cloudflare WARP bootstrap
 # -----------------------------------------------------------------------------
 
-WARP_API_URL="${CONDUIT_WARP_API_URL:-https://api.cloudflareclient.com/v0a737/reg}"
+WARP_API_URL="${CONDUIT_WARP_API_URL:-https://api.cloudflareclient.com/v0a1922/reg}"
 
 WARP_DNS="${CONDUIT_WARP_DNS:-1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001}"
 
@@ -39,7 +39,7 @@ WARP_MTU="${CONDUIT_WARP_MTU:-1280}"
 
 WARP_ALLOWED_IPS="${CONDUIT_WARP_ALLOWED_IPS:-0.0.0.0/0, ::/0}"
 
-WARP_DEVICE_TYPE="${CONDUIT_WARP_DEVICE_TYPE:-Linux}"
+WARP_DEVICE_TYPE="${CONDUIT_WARP_DEVICE_TYPE:-Android}"
 WARP_LOCALE="${CONDUIT_WARP_LOCALE:-en_US}"
 WARP_PERSISTENT_KEEPALIVE="${CONDUIT_WARP_PERSISTENT_KEEPALIVE:-0}"
 
@@ -344,9 +344,10 @@ bootstrap_warp_config() {
             '{
                 key: $key,
                 install_id: "",
-                warp_enabled: true,
+                fcm_token: "",
                 tos: $tos,
                 type: $type,
+                model: "PC",
                 locale: $locale
             }'
     )"
@@ -364,6 +365,8 @@ bootstrap_warp_config() {
             --connect-timeout 10 \
             --max-time 30 \
             -X POST \
+            -H 'User-Agent: okhttp/3.12.1' \
+            -H 'CF-Client-Version: a-6.3-1922' \
             -H 'Content-Type: application/json' \
             --data "$payload" \
             "$WARP_API_URL"

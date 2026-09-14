@@ -129,10 +129,10 @@ conduit doctor
 conduit show-vpn
 ```
 
-For v3:
+For v3.1:
 
 ```text
-conduit 3.0.0
+conduit 3.2.0
 ```
 
 `conduit doctor` checks dependencies, profile permissions, privilege escalation, network namespace creation, and WireGuard support.

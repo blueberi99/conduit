@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: |
+          bash -n conduit.sh
+          bash -n install.sh
+          bash -n uninstall.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Windows smoke tests
+        shell: powershell
+        run: |
+          .\tests\smoke.ps1
+          .\tests\windows-integration.ps1
+          .\tests\windows-service-cli-integration.ps1

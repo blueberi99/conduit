@@ -1,5 +1,89 @@
 # changelog
 
+# Conduit v3.2.0
+
+- Added a WinUtil-style one-line Windows installer at `bootstrap.ps1`
+- The online installer requires Administrator PowerShell and installs WireSock
+  automatically through winget
+- When no VPN profile exists, the installer adds WireGuard for Windows and
+  creates a Cloudflare WARP profile automatically
+- Added `conduit update`, which refuses to replace files during an active
+  session, requests Administrator permission through UAC, and reinstalls from
+  the same official GitHub bootstrap source
+- Windows uninstall now explicitly requires Administrator permission while
+  continuing to preserve VPN profiles and third-party VPN software
+
+# Conduit v3.1.6
+
+- Recognize WireSock 3.6's real `Connection established` and handshake-response
+  messages instead of timing out after a successfully established tunnel
+
+# Conduit v3.1.5
+
+- Pin generated standard WireGuard session profiles to `Jc = 0` so WireSock
+  3.6 global junk-packet defaults cannot alter a provider handshake
+- Preserve an explicit provider `Jc` value when one is present
+
+# Conduit v3.1.4
+
+- Updated Cloudflare WARP bootstrap to the current `v0a1922` registration
+  endpoint and Android client-compatible request headers and payload
+
+# Conduit v3.1.3
+
+- Force TLS 1.2 for Cloudflare WARP registration under Windows PowerShell 5.1
+  while restoring the process-wide TLS setting after bootstrap
+
+# Conduit v3.1.2
+
+- Fixed PowerShell selecting the installed `conduit.ps1` before the
+  `conduit.cmd` launcher on systems where script execution is disabled
+- The installed implementation now uses the private name `conduit-main.ps1`;
+  the public `conduit` command always applies its process-scoped policy bypass
+
+# Conduit v3.1.1
+
+- Added support for WireSock Secure Connect 3.4.5 and newer, which installs the
+  service-based `wiresock-connect-cli.exe` instead of `wiresock-client.exe`
+- Conduit now imports a unique temporary session profile, connects through the
+  WireSock service, disconnects cleanly, and deletes the imported profile
+- Kept compatibility with older standalone WireSock installations
+- Fixed the Windows installer incorrectly warning that WireSock 3.6.1 was not
+  installed after a successful winget installation
+
+# Conduit v3.1.0
+
+Conduit v3.1 adds a native Windows command surface while preserving the Linux
+network-namespace implementation.
+
+## Windows support
+
+- Added `conduit.ps1` and `conduit.cmd` for Windows 10 and Windows 11
+- Added per-application WireGuard routing through WireSock Secure Connect
+- Added WireSock network lock integration as the Windows kill switch
+- Added Windows profile discovery, random selection, provider filtering,
+  foreground/detached launches, status, logs, doctor, and session cleanup
+- Added ACL-protected, per-session profile copies; source profiles are never
+  modified
+- Added Cloudflare WARP bootstrap through WireGuard for Windows `wg.exe`
+- Added user-local `install.ps1` and `uninstall.ps1`
+- Added a Windows installation and troubleshooting guide
+
+## Discord reliability
+
+- Added automatic discovery of the newest Discord, Discord PTB, and Discord
+  Canary executable below their versioned Squirrel `app-*` directories
+- WireSock filters target the stable Discord installation root, so executable
+  path changes after an update do not invalidate the VPN rule
+- Existing Discord instances are rejected before session start to keep routing
+  and lifecycle ownership unambiguous
+
+## Limitations
+
+- Windows supports one active Conduit tunnel at a time
+- `conduit attach` remains Linux-only because Windows has no equivalent to a
+  Linux network namespace for ordinary desktop applications
+
 # Conduit v3.0.0
 
 Conduit v3 marks the completion of the new isolated-session architecture and turns Conduit into a complete install-and-run tool rather than a standalone network namespace script.

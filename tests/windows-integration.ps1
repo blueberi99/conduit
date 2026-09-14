@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+#Requires -Version 5.1
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$repository = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$scriptPath = Join-Path $repository 'conduit.ps1'
+$fixture = Join-Path $repository 'tests\fixtures\cloudflare\example.conf'
+$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-integration-' + [Guid]::NewGuid().ToString('N'))
+$profileRoot = Join-Path $testRoot 'profiles'
+$stateRoot = Join-Path $testRoot 'state'
+$squirrelRoot = Join-Path $testRoot 'DiscordCanary'
+$appDirectory = Join-Path $squirrelRoot 'app-2.0.1'
+$appPath = Join-Path $appDirectory 'DiscordCanary.exe'
+$backendPath = Join-Path $testRoot 'fake-wiresock.exe'
+$capturePath = Join-Path $testRoot 'captured.conf'
+
+function Assert-True {
+    param(
+        [Parameter(Mandatory = $true)][bool] $Condition,
+        [Parameter(Mandatory = $true)][string] $Message
+    )
+    if (-not $Condition) { throw $Message }
+}
+
+$backendSource = @'
+using System;
+using System.IO;
+using System.Threading;
+
+public static class FakeWireSock
+{
+    public static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "reset-network-lock") return 0;
+        for (int i = 0; i + 1 < args.Length; i++)
+        {
+            if (args[i] == "-config")
+            {
+                string capture = Environment.GetEnvironmentVariable("FAKE_WIRESOCK_CAPTURE");
+                if (!String.IsNullOrEmpty(capture)) File.Copy(args[i + 1], capture, true);
+            }
+        }
+        Console.WriteLine("fake tunnel ready");
+        while (true) Thread.Sleep(250);
+    }
+}
+'@
+
+$applicationSource = @'
+using System.Threading;
+
+public static class FakeApplication
+{
+    public static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "sleep") Thread.Sleep(30000);
+        return 0;
+    }
+}
+'@
+
+try {
+    New-Item -ItemType Directory -Path $profileRoot, $appDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $fixture -Destination (Join-Path $profileRoot 'example.conf')
+    Add-Type -TypeDefinition $backendSource -Language CSharp -OutputAssembly $backendPath -OutputType ConsoleApplication
+    Add-Type -TypeDefinition $applicationSource -Language CSharp -OutputAssembly $appPath -OutputType ConsoleApplication
+    Copy-Item -LiteralPath $appPath -Destination (Join-Path $squirrelRoot 'Update.exe')
+
+    $env:CONDUIT_DIR = $profileRoot
+    $env:CONDUIT_STATE_DIR = $stateRoot
+    $env:CONDUIT_WIRESOCK = $backendPath
+    $env:CONDUIT_STARTUP_DELAY_MS = '250'
+    $env:CONDUIT_NO_TASKKILL = '1'
+    $env:FAKE_WIRESOCK_CAPTURE = $capturePath
+    $env:LOCALAPPDATA = $testRoot
+
+    Write-Output 'integration: foreground session'
+    $ErrorActionPreference = 'Continue'
+    $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        -f --vpn example discordcanary 2>&1)
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Assert-True ($exitCode -eq 0) "foreground session failed: $($output -join ' ')"
+    Assert-True (Test-Path -LiteralPath $capturePath -PathType Leaf) 'backend did not receive the generated profile'
+
+    $captured = Get-Content -LiteralPath $capturePath -Raw
+    Assert-True ($captured.Contains("#@ws:AllowedApps = $squirrelRoot")) 'Squirrel app did not use its stable install root'
+    Assert-True (-not $captured.Contains("#@ws:AllowedApps = $appPath")) 'versioned executable leaked into AllowedApps'
+    Assert-True ($captured.Contains('AllowedIPs = 0.0.0.0/0, ::/0')) 'generated profile does not prevent IPv6 bypass'
+    Assert-True ($captured.Contains('Jc = 0')) 'standard WireGuard handshake mode was not pinned'
+
+    $sourceProfile = Get-Content -LiteralPath (Join-Path $profileRoot 'example.conf') -Raw
+    Assert-True ($sourceProfile -notmatch 'AllowedApps') 'source VPN profile was modified'
+
+    $sessionFile = Get-ChildItem -LiteralPath (Join-Path $stateRoot 'sessions') -Filter 'session.json' -Recurse |
+        Select-Object -First 1
+    Assert-True ($null -ne $sessionFile) 'session state was not recorded'
+    $session = Get-Content -LiteralPath $sessionFile.FullName -Raw | ConvertFrom-Json
+    Assert-True ($session.State -eq 'stopped') 'completed foreground session was not marked stopped'
+    Assert-True (@($session.ProcessNames) -contains 'Update') 'Squirrel updater process is not tracked'
+
+    Write-Output 'integration: detached session'
+    $ErrorActionPreference = 'Continue'
+    $detachedOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        --vpn example discordcanary sleep 2>&1)
+    $detachedExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Assert-True ($detachedExitCode -eq 0) "detached session failed: $($detachedOutput -join ' ')"
+    Assert-True (($detachedOutput -join ' ') -match 'session ([0-9a-f]{8}) started') 'detached session ID was not reported'
+    $detachedId = $Matches[1]
+
+    Write-Output "integration: stopping $detachedId"
+    $ErrorActionPreference = 'Continue'
+    $killOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        kill $detachedId 2>&1)
+    $killExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Assert-True ($killExitCode -eq 0) "kill command failed: $($killOutput -join ' ')"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $stateRoot 'sessions') $detachedId))) `
+        'killed session directory was not removed'
+
+    Write-Output 'Conduit Windows integration test passed.'
+}
+finally {
+    if (Test-Path -LiteralPath $testRoot -PathType Container) {
+        Remove-Item -LiteralPath $testRoot -Recurse -Force
+    }
+}
