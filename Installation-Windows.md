@@ -15,13 +15,16 @@ backend and intentionally supports one active Conduit tunnel at a time.
 - Windows PowerShell 5.1 or PowerShell 7+
 - Windows Package Manager (`winget`)
 
-The online installer adds WireSock Secure Connect automatically. If it cannot
-find a WireGuard `.conf` profile, it also installs WireGuard for Windows and
-creates a Cloudflare WARP profile.
+The online installer can add WireSock Secure Connect after displaying its
+third-party terms and receiving an explicit `ACCEPT`. If it cannot find a
+WireGuard `.conf` profile, it also installs WireGuard for Windows and creates a
+Cloudflare WARP profile.
 
 WireSock Secure Connect is free for personal, educational, and non-profit use.
 Commercial use requires an appropriate WireSock license. Review its current
 license before distributing or using Conduit in a business environment.
+WireSock remains a separate program and is not covered by Conduit's AGPL
+license. See [Third-party notices](THIRD-PARTY-NOTICES.md).
 
 ## 2. Install
 
@@ -35,6 +38,9 @@ This follows the same download-and-run model used by WinUtil: the command reads
 the bootstrap script from the official Conduit GitHub repository, downloads the
 current `master` archive, and runs the installer. Review `bootstrap.ps1` before
 executing it if you do not want to trust a mutable branch as Administrator.
+If WireSock is missing, continuing requires typing `ACCEPT` after the installer
+shows the WireSock licensing and telemetry notice. This acceptance applies to
+WireSock's own EULA, not to Conduit's AGPL license.
 
 Dependencies use the official Windows Package Manager package identifiers:
 
@@ -47,6 +53,13 @@ For development from a cloned repository, use Administrator PowerShell:
 
 ```powershell
 .\install.ps1 -InstallWireSock -BootstrapIfEmpty
+```
+
+For reviewed unattended installations, `-AcceptWireSockLicense` records the
+operator's explicit decision and suppresses only Conduit's confirmation prompt:
+
+```powershell
+.\install.ps1 -InstallWireSock -AcceptWireSockLicense -BootstrapIfEmpty
 ```
 
 The installer copies Conduit to:

@@ -40,6 +40,11 @@ public static class FakeWireSockServiceCli
         string stop = Environment.GetEnvironmentVariable("FAKE_WIRESOCK_STOP");
         if (args[0] == "import")
         {
+            if (Environment.GetEnvironmentVariable("FAKE_WIRESOCK_IMPORT_FAILURE") == "1")
+            {
+                Console.WriteLine("Failed to import profile: invalid test profile");
+                return 0;
+            }
             File.Copy(args[1], Environment.GetEnvironmentVariable("FAKE_WIRESOCK_CAPTURE"), true);
             return 0;
         }
@@ -112,10 +117,22 @@ try {
     Assert-True ((Get-Content -LiteralPath $deletedPath -Raw) -eq $session.ImportedProfile) `
         'wrong WireSock profile was deleted'
 
+    $env:FAKE_WIRESOCK_IMPORT_FAILURE = '1'
+    $ErrorActionPreference = 'Continue'
+    $failureOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        -f --vpn example $appPath 2>&1)
+    $failureExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Remove-Item Env:FAKE_WIRESOCK_IMPORT_FAILURE
+    Assert-True ($failureExitCode -eq 1) 'reported WireSock import failure should fail the session'
+    Assert-True (($failureOutput -join ' ') -match 'could not import the session profile') `
+        'reported WireSock import failure was not surfaced clearly'
+
     Write-Output 'Conduit WireSock service CLI integration test passed.'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
+    Remove-Item Env:FAKE_WIRESOCK_IMPORT_FAILURE -ErrorAction SilentlyContinue
 }

@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.0'
+$script:Version = '3.2.1'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -90,6 +90,38 @@ function Protect-ConduitDirectory {
         $allow = [System.Security.AccessControl.AccessControlType]::Allow
 
         $acl = Get-Acl -LiteralPath $Path
+        $allowedSids = @($userSid.Value, $systemSid.Value)
+        $hasUserFullControl = $false
+        $hasSystemFullControl = $false
+        $aclIsRestricted = $true
+        foreach ($rule in $acl.Access) {
+            try {
+                $ruleSid = $rule.IdentityReference.Translate(
+                    [System.Security.Principal.SecurityIdentifier]
+                ).Value
+            }
+            catch {
+                $aclIsRestricted = $false
+                break
+            }
+            if ($ruleSid -notin $allowedSids) {
+                $aclIsRestricted = $false
+                break
+            }
+            if ($rule.AccessControlType -eq $allow -and
+                ($rule.FileSystemRights -band $rights) -eq $rights) {
+                if ($ruleSid -eq $userSid.Value) { $hasUserFullControl = $true }
+                if ($ruleSid -eq $systemSid.Value) { $hasSystemFullControl = $true }
+            }
+        }
+
+        # A child directory that inherits only the already-restricted parent
+        # ACL is just as private. Avoid rewriting that ACL on every launch;
+        # some non-elevated Windows environments reject the redundant write.
+        if ($aclIsRestricted -and $hasUserFullControl -and $hasSystemFullControl) {
+            return
+        }
+
         $acl.SetAccessRuleProtection($true, $false)
         $userRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
             $userSid, $rights, $inheritance, $propagation, $allow
@@ -242,6 +274,7 @@ function Select-ConduitProfile {
         })
 
         if ($exact.Count -eq 1) {
+            Test-WireGuardProfile -Path $exact[0].FullName
             return $exact[0]
         }
         if ($exact.Count -gt 1) {
@@ -254,6 +287,7 @@ function Select-ConduitProfile {
                 $_.Name.IndexOf($Vpn, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
         })
         if ($partial.Count -eq 1) {
+            Test-WireGuardProfile -Path $partial[0].FullName
             return $partial[0]
         }
         if ($partial.Count -gt 1) {
@@ -263,6 +297,26 @@ function Select-ConduitProfile {
 
         Throw-ConduitError "profile not found: $Vpn"
     }
+
+    $validPool = @()
+    $invalidCount = 0
+    foreach ($profile in $pool) {
+        try {
+            Test-WireGuardProfile -Path $profile.FullName
+            $validPool += $profile
+        }
+        catch {
+            $invalidCount++
+        }
+    }
+    if ($invalidCount -gt 0) {
+        Write-Warning "Ignoring $invalidCount invalid VPN profile(s); run 'conduit doctor' for details"
+    }
+    if ($validPool.Count -eq 0) {
+        $scope = if ([string]::IsNullOrWhiteSpace($Provider)) { '' } else { " for provider '$Provider'" }
+        Throw-ConduitError "no valid VPN profiles$scope; run 'conduit doctor' for details"
+    }
+    $pool = $validPool
 
     $last = ''
     if (Test-Path -LiteralPath $script:LastProfilePath -PathType Leaf) {
@@ -547,14 +601,38 @@ function Test-WireGuardProfile {
     $content = Get-Content -LiteralPath $Path -Raw
     foreach ($required in @(
         '(?im)^\s*\[Interface\]\s*$',
-        '(?im)^\s*PrivateKey\s*=',
         '(?im)^\s*\[Peer\]\s*$',
-        '(?im)^\s*PublicKey\s*=',
         '(?im)^\s*AllowedIPs\s*=',
         '(?im)^\s*Endpoint\s*='
     )) {
         if ($content -notmatch $required) {
             Throw-ConduitError "invalid WireGuard profile '$Path'; missing required field"
+        }
+    }
+
+    $interfaceCount = [regex]::Matches($content, '(?im)^\s*\[Interface\]\s*$').Count
+    $peerCount = [regex]::Matches($content, '(?im)^\s*\[Peer\]\s*$').Count
+    if ($interfaceCount -ne 1 -or $peerCount -ne 1) {
+        Throw-ConduitError "invalid WireGuard profile '$Path'; Windows requires exactly one [Interface] and one [Peer]"
+    }
+
+    foreach ($field in @('PrivateKey', 'PublicKey')) {
+        $keyMatches = [regex]::Matches(
+            $content,
+            "(?im)^\s*$field\s*=\s*([^\r\n]+?)\s*$"
+        )
+        if ($keyMatches.Count -ne 1) {
+            Throw-ConduitError "invalid WireGuard profile '$Path'; expected exactly one $field"
+        }
+        $key = $keyMatches[0].Groups[1].Value.Trim()
+        try {
+            $keyBytes = [Convert]::FromBase64String($key)
+        }
+        catch {
+            Throw-ConduitError "invalid WireGuard profile '$Path'; $field is not valid Base64"
+        }
+        if ($keyBytes.Length -ne 32) {
+            Throw-ConduitError "invalid WireGuard profile '$Path'; $field must contain a 32-byte WireGuard key"
         }
     }
 }
@@ -1070,11 +1148,12 @@ function Invoke-ConduitSupervisor {
             $import.Refresh()
             $importExitCode = $import.ExitCode
             if ($null -eq $importExitCode) { $importExitCode = 0 }
-            if ($importExitCode -ne 0) {
-                $details = @()
-                if (Test-Path -LiteralPath $importOut) { $details += Get-Content -LiteralPath $importOut -Tail 8 }
-                if (Test-Path -LiteralPath $importErr) { $details += Get-Content -LiteralPath $importErr -Tail 8 }
-                Throw-ConduitError "WireSock could not import the session profile (exit $importExitCode). $($details -join ' ')"
+            $importDetails = @()
+            if (Test-Path -LiteralPath $importOut) { $importDetails += Get-Content -LiteralPath $importOut -Tail 8 }
+            if (Test-Path -LiteralPath $importErr) { $importDetails += Get-Content -LiteralPath $importErr -Tail 8 }
+            $importMessage = ($importDetails -join ' ').Trim()
+            if ($importExitCode -ne 0 -or $importMessage -match '(?i)\bfailed\s+to\s+import\b') {
+                Throw-ConduitError "WireSock could not import the session profile (exit $importExitCode). $importMessage"
             }
 
             $tunnel = Start-ManagedProcess -FilePath $backend `
@@ -1110,11 +1189,14 @@ function Invoke-ConduitSupervisor {
             Start-Sleep -Milliseconds 200
             $elapsed += 200
             if ($tunnel.HasExited) {
-                $details = ''
-                if (Test-Path -LiteralPath $tunnelErr) {
-                    $details = ((Get-Content -LiteralPath $tunnelErr -Tail 8) -join ' ')
+                $details = @()
+                if (Test-Path -LiteralPath $tunnelOut) {
+                    $details += Get-Content -LiteralPath $tunnelOut -Tail 8
                 }
-                Throw-ConduitError "WireSock exited during tunnel startup. $details"
+                if (Test-Path -LiteralPath $tunnelErr) {
+                    $details += Get-Content -LiteralPath $tunnelErr -Tail 8
+                }
+                Throw-ConduitError "WireSock exited during tunnel startup. $(($details -join ' ').Trim())"
             }
             if ($backendKind -eq 'service-cli' -and (Test-Path -LiteralPath $tunnelOut -PathType Leaf)) {
                 $recentTunnelOutput = (Get-Content -LiteralPath $tunnelOut -Tail 30) -join [Environment]::NewLine
@@ -1378,6 +1460,8 @@ function Show-ConduitProfiles {
     foreach ($profile in $profiles) {
         $id = Get-ProfileId $profile
         $marks = ''
+        try { Test-WireGuardProfile -Path $profile.FullName }
+        catch { $marks += ' [invalid]' }
         if ($id -ieq $last) { $marks += ' [last]' }
         if ($activeProfiles.ContainsKey($id)) { $marks += " [active:$($activeProfiles[$id])]" }
         Write-Output "  $id$marks"
@@ -1763,7 +1847,7 @@ Endpoint = $($peer.endpoint.host)
 function Invoke-Conduit {
     param([object[]] $CommandLine)
 
-    $values = @($CommandLine | ForEach-Object { [string]$_ })
+    $values = @($CommandLine | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
     if ($values.Count -eq 0) {
         Show-ConduitUsage
         $script:ExitCode = 1

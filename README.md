@@ -72,14 +72,22 @@ See [Installation.md](Installation.md) for the complete Linux guide.
 
 ## Install on Windows
 
+The Windows backend depends on WireSock Secure Connect, a separately licensed,
+mostly proprietary third-party product. WireSock is not part of Conduit and is
+not covered by Conduit's AGPL license. Its free edition is limited to personal,
+educational, and non-profit use and includes telemetry; commercial use requires
+a separate WireSock license. See [Third-party notices](THIRD-PARTY-NOTICES.md).
+
 Open PowerShell as Administrator and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1 | iex
 ```
 
-The installer adds WireSock automatically. If no `.conf` profile exists, it
-also installs WireGuard for Windows and creates a Cloudflare WARP profile.
+If WireSock is not already present, the installer displays these terms and
+requires you to type `ACCEPT` before asking winget to install it under the
+WireSock EULA. If no `.conf` profile exists, it also installs WireGuard for
+Windows and creates a Cloudflare WARP profile.
 Open a new terminal and verify the installation:
 
 ```powershell

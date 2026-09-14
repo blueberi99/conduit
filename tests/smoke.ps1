@@ -11,7 +11,7 @@ $fixtureDirectory = Join-Path $repository 'tests\fixtures'
 $stateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-smoke-' + [Guid]::NewGuid().ToString('N'))
 
 function Invoke-TestCommand {
-    param([Parameter(Mandatory = $true)][string[]] $Arguments)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments)
 
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -42,7 +42,12 @@ try {
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.0$') 'unexpected version output'
+    Assert-True ($version.Output -match '^conduit 3\.2\.1$') 'unexpected version output'
+
+    $noArguments = Invoke-TestCommand @()
+    Assert-True ($noArguments.ExitCode -eq 1) 'empty command should show usage and fail'
+    Assert-True ($noArguments.Output -match '^Conduit - isolated') 'empty command did not show usage'
+    Assert-True ($noArguments.Output -notmatch 'Cannot bind argument') 'empty command reached application resolution'
 
     $help = Invoke-TestCommand @('--help')
     Assert-True ($help.ExitCode -eq 0) 'help command failed'
@@ -52,6 +57,18 @@ try {
     $profiles = Invoke-TestCommand @('show-vpn')
     Assert-True ($profiles.ExitCode -eq 0) 'show-vpn command failed'
     Assert-True ($profiles.Output -match 'cloudflare\\example\.conf') 'nested profile was not discovered'
+    Assert-True ($profiles.Output -match 'proton\\invalid\.conf \[invalid\]') 'invalid profile was not marked'
+
+    $invalidProfile = Invoke-TestCommand @('--vpn', 'invalid', 'missing.exe')
+    Assert-True ($invalidProfile.ExitCode -eq 1) 'invalid profile should be rejected before launch'
+    Assert-True ($invalidProfile.Output -match 'PrivateKey is not valid Base64') 'invalid key error is unclear'
+
+    $randomSelection = Invoke-TestCommand @('missing.exe')
+    Assert-True ($randomSelection.ExitCode -eq 1) 'missing test application should fail'
+    Assert-True ($randomSelection.Output -match 'Ignoring 1 invalid VPN profile') `
+        'random selection did not report the ignored invalid profile'
+    Assert-True ($randomSelection.Output -match 'application not found') `
+        'random selection did not continue with the remaining valid profile'
 
     $status = Invoke-TestCommand @('status')
     Assert-True ($status.ExitCode -eq 0) 'status command failed'

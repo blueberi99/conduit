@@ -1,5 +1,20 @@
 # changelog
 
+# Conduit v3.2.1
+
+- Added an explicit WireSock third-party license and telemetry notice; fresh
+  Windows installs require a separate `ACCEPT` before winget installs WireSock
+- Documented that WireSock is not part of Conduit and is not covered by the
+  project's AGPL license
+- Fixed an empty `conduit` invocation reaching application resolution instead
+  of displaying usage
+- Validate WireGuard public/private keys before launch, mark invalid profiles,
+  and exclude them from random selection
+- Detect WireSock 3.6 import failures even when its CLI incorrectly exits with
+  code zero, and include stdout in tunnel-startup errors
+- Avoid redundant ACL rewrites when a directory already inherits an ACL
+  restricted to the current user and LocalSystem
+
 # Conduit v3.2.0
 
 - Added a WinUtil-style one-line Windows installer at `bootstrap.ps1`

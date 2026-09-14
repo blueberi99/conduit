@@ -11,7 +11,7 @@ set -euo pipefail
 # Global configuration
 # =============================================================================
 
-VERSION="3.2.0"
+VERSION="3.2.1"
 
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 

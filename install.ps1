@@ -6,6 +6,7 @@
 [CmdletBinding()]
 param(
     [switch] $InstallWireSock,
+    [switch] $AcceptWireSockLicense,
     [switch] $InstallWireGuard,
     [switch] $BootstrapIfEmpty,
     [switch] $NoPath
@@ -22,6 +23,7 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
 
 $sourceDirectory = Split-Path -Parent $PSCommandPath
 $installDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Conduit'
+$stateDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Conduit'
 $profileDirectory = [Environment]::GetEnvironmentVariable('CONDUIT_DIR')
 if ([string]::IsNullOrWhiteSpace($profileDirectory)) {
     $profileDirectory = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'vpns'
@@ -82,6 +84,42 @@ function Install-WingetPackage {
     }
 }
 
+function Confirm-WireSockTerms {
+    if ($AcceptWireSockLicense) { return }
+
+    Write-Warning 'WireSock Secure Connect is a separate, mostly proprietary third-party dependency.'
+    Write-Output 'Its free license is limited to personal, educational, and non-profit use.'
+    Write-Output 'The free edition includes telemetry. Commercial use requires a separate WireSock license.'
+    Write-Output 'WireSock EULA: https://www.wiresock.net/license/wiresock_eula'
+    Write-Output ''
+    $answer = Read-Host 'Type ACCEPT to let winget install WireSock under its own license'
+    if ($answer -cne 'ACCEPT') {
+        throw 'WireSock license was not accepted; installation cancelled before installing the dependency'
+    }
+}
+
+function Protect-ConduitStateDirectory {
+    foreach ($path in @($stateDirectory, (Join-Path $stateDirectory 'sessions'))) {
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $propagation = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $acl = Get-Acl -LiteralPath $path
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $userSid, $rights, $inheritance, $propagation, $allow
+        ))
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $systemSid, $rights, $inheritance, $propagation, $allow
+        ))
+        Set-Acl -LiteralPath $path -AclObject $acl
+    }
+}
+
 Write-Output 'Conduit installer for Windows'
 Write-Output ''
 
@@ -93,6 +131,7 @@ foreach ($requiredFile in @('conduit.ps1', 'conduit.cmd')) {
 }
 
 if ($InstallWireSock -and -not (Test-WireSockInstalled)) {
+    Confirm-WireSockTerms
     Install-WingetPackage -Id 'NTKERNEL.WireSockVPNClient' -Label 'WireSock Secure Connect'
 }
 
@@ -117,6 +156,7 @@ Copy-Item -LiteralPath (Join-Path $sourceDirectory 'conduit.cmd') `
 # from Conduit 3.1.1 or older.
 Remove-Item -LiteralPath (Join-Path $installDirectory 'conduit.ps1') -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
+Protect-ConduitStateDirectory
 
 if (-not $NoPath) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
