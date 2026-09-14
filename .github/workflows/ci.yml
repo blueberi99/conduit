@@ -24,7 +24,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run Windows smoke tests
         shell: powershell
-        run: |
-          .\tests\smoke.ps1
-          .\tests\windows-integration.ps1
-          .\tests\windows-service-cli-integration.ps1
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\smoke.ps1
+      - name: Run Windows process integration tests
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-integration.ps1
+      - name: Run WireSock service CLI integration tests
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-service-cli-integration.ps1
