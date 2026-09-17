@@ -110,7 +110,7 @@ try {
 
     $sessionFile = Get-ChildItem -LiteralPath (Join-Path $stateRoot 'sessions') -Filter 'session.json' -Recurse |
         Select-Object -First 1
-    $session = Get-Content -LiteralPath $sessionFile.FullName -Raw | ConvertFrom-Json
+    $session = Get-Content -LiteralPath $sessionFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-True ($session.State -eq 'stopped') 'service CLI session was not marked stopped'
     Assert-True ($session.BackendKind -eq 'service-cli') 'new WireSock CLI was not recognized'
     Assert-True ($session.ImportedProfile -match '^conduit-[0-9a-f]{8}$') 'temporary profile name was not session-unique'
@@ -127,6 +127,18 @@ try {
     Assert-True ($failureExitCode -eq 1) 'reported WireSock import failure should fail the session'
     Assert-True (($failureOutput -join ' ') -match 'could not import the session profile') `
         'reported WireSock import failure was not surfaced clearly'
+    Assert-True (($failureOutput -join ' ') -match 'Conduit session ([0-9a-f]{8})') `
+        'failed session ID was not reported'
+    $failureId = $Matches[1]
+
+    $ErrorActionPreference = 'Continue'
+    $logsOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        logs $failureId 2>&1)
+    $logsExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Assert-True ($logsExitCode -eq 0) 'failed-session logs command failed'
+    Assert-True (($logsOutput -join ' ') -match '== import\.log ==') `
+        'WireSock import log was omitted from conduit logs'
 
     Write-Output 'Conduit WireSock service CLI integration test passed.'
 }

@@ -81,7 +81,7 @@ Existing WARP profiles are never silently overwritten.
 
 ## 5. Using your own VPN profiles
 
-Conduit supports normal WireGuard configurations from providers such as Proton VPN, Mullvad, Cloudflare WARP, and others.
+Conduit supports normal WireGuard configurations from providers such as Proton VPN, Mullvad, Windscribe, Cloudflare WARP, and others.
 
 Recommended layout:
 
@@ -91,14 +91,21 @@ Recommended layout:
 │   └── PDE-778-DE-778.conf
 ├── mullvad/
 │   └── de-ber-wg-102.conf
+├── windscribe/
+│   └── Athens-Odeon-WG.conf
 └── cloudflare/
     └── warp.conf
 ```
 
+Windscribe WireGuard exports are supported with their dual-stack `Address`,
+provider `DNS`, `Endpoint`, and `PresharedKey` fields unchanged. Legacy flat
+files named `Windscribe-*.conf` can be selected with
+`--provider windscribe`.
+
 Create provider directories as needed:
 
 ```bash
-mkdir -p ~/vpns/proton ~/vpns/mullvad
+mkdir -p ~/vpns/proton ~/vpns/mullvad ~/vpns/windscribe
 ```
 
 Copy profiles:
@@ -129,10 +136,10 @@ conduit doctor
 conduit show-vpn
 ```
 
-For v3.1:
+Expected output:
 
 ```text
-conduit 3.2.0
+conduit 3.2.2
 ```
 
 `conduit doctor` checks dependencies, profile permissions, privilege escalation, network namespace creation, and WireGuard support.
@@ -185,6 +192,7 @@ Or choose a provider:
 ```bash
 conduit --provider proton discord
 conduit --provider cloudflare firefox
+conduit --provider windscribe discord
 ```
 
 Each launch receives its own network namespace and WireGuard interface.

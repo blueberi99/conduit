@@ -42,7 +42,7 @@ try {
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.1$') 'unexpected version output'
+    Assert-True ($version.Output -match '^conduit 3\.2\.2$') 'unexpected version output'
 
     $noArguments = Invoke-TestCommand @()
     Assert-True ($noArguments.ExitCode -eq 1) 'empty command should show usage and fail'
@@ -58,6 +58,18 @@ try {
     Assert-True ($profiles.ExitCode -eq 0) 'show-vpn command failed'
     Assert-True ($profiles.Output -match 'cloudflare\\example\.conf') 'nested profile was not discovered'
     Assert-True ($profiles.Output -match 'proton\\invalid\.conf \[invalid\]') 'invalid profile was not marked'
+    Assert-True ($profiles.Output -match 'Windscribe-Athens-Odeon-WG\.conf') `
+        'flat Windscribe profile was not discovered'
+
+    $windscribe = Invoke-TestCommand @('--provider', 'windscribe', 'missing.exe')
+    Assert-True ($windscribe.ExitCode -eq 1) 'Windscribe selection should reach application resolution'
+    Assert-True ($windscribe.Output -match 'application not found') `
+        'flat Windscribe provider selection did not choose the Windscribe profile'
+
+    $mullvad = Invoke-TestCommand @('--provider', 'mullvad', 'missing.exe')
+    Assert-True ($mullvad.ExitCode -eq 1) 'empty Mullvad selection should fail'
+    Assert-True ($mullvad.Output -match 'no profiles for provider: mullvad') `
+        'flat Windscribe profile leaked into legacy Mullvad selection'
 
     $invalidProfile = Invoke-TestCommand @('--vpn', 'invalid', 'missing.exe')
     Assert-True ($invalidProfile.ExitCode -eq 1) 'invalid profile should be rejected before launch'

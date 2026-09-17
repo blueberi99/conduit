@@ -1,5 +1,17 @@
 # changelog
 
+# Conduit v3.2.2
+
+- Preserve non-ASCII user, application, state, and profile paths under Windows
+  PowerShell 5.1 by reading Conduit's BOM-less UTF-8 files explicitly
+- Start detached Windows supervisors through an ASCII relative launcher name,
+  avoiding `cmd.exe` path corruption for non-ASCII or spaced usernames
+- Include WireSock profile-import output in `conduit logs` for failed sessions
+- Add explicit Windscribe WireGuard coverage for dual-stack addresses,
+  provider DNS, endpoints, and preshared keys
+- Recognize legacy flat `Windscribe-*.conf` profiles with
+  `--provider windscribe` on Linux and Windows
+
 # Conduit v3.2.1
 
 - Added an explicit WireSock third-party license and telemetry notice; fresh

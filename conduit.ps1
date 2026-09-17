@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.1'
+$script:Version = '3.2.2'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -54,6 +54,16 @@ function Write-Utf8File {
 
     $encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+
+function Read-Utf8File {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    # Windows PowerShell 5.1 treats BOM-less text as the active ANSI code page.
+    # Conduit writes UTF-8 without a BOM, so always decode its own files
+    # explicitly to preserve non-ASCII user, application, and profile paths.
+    return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
 }
 
 
@@ -186,6 +196,7 @@ examples:
   conduit firefox.exe
   conduit --vpn PDE-778 discord.exe
   conduit --provider mullvad firefox.exe
+  conduit --provider windscribe discord.exe
   conduit -f curl.exe https://ifconfig.me
 
 profile layout:
@@ -248,9 +259,15 @@ function Get-ProviderProfiles {
             (Get-ProfileId $_) -notlike '*\*' -and $_.Name -like 'PDE*'
         })
     }
+    if ($Provider -ieq 'windscribe') {
+        return @($Profiles | Where-Object {
+            (Get-ProfileId $_) -notlike '*\*' -and $_.Name -like 'Windscribe-*'
+        })
+    }
     if ($Provider -ieq 'mullvad') {
         return @($Profiles | Where-Object {
-            (Get-ProfileId $_) -notlike '*\*' -and $_.Name -notlike 'PDE*'
+            (Get-ProfileId $_) -notlike '*\*' -and
+                $_.Name -notlike 'PDE*' -and $_.Name -notlike 'Windscribe-*'
         })
     }
 
@@ -331,7 +348,7 @@ function Select-ConduitProfile {
 
     $last = ''
     if (Test-Path -LiteralPath $script:LastProfilePath -PathType Leaf) {
-        $last = (Get-Content -LiteralPath $script:LastProfilePath -Raw).Trim()
+        $last = (Read-Utf8File -Path $script:LastProfilePath).Trim()
     }
 
     $withoutLast = @($pool | Where-Object { (Get-ProfileId $_) -ine $last })
@@ -609,7 +626,7 @@ function Stop-AllowedApplicationProcesses {
 function Test-WireGuardProfile {
     param([Parameter(Mandatory = $true)][string] $Path)
 
-    $content = Get-Content -LiteralPath $Path -Raw
+    $content = Read-Utf8File -Path $Path
     foreach ($required in @(
         '(?im)^\s*\[Interface\]\s*$',
         '(?im)^\s*\[Peer\]\s*$',
@@ -730,7 +747,7 @@ function Read-SessionState {
     }
 
     try {
-        return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        return (Read-Utf8File -Path $path) | ConvertFrom-Json
     }
     catch {
         return $null
@@ -1004,8 +1021,12 @@ start "" /min "%CONDUIT_LAUNCH_HOST%" "-NoLogo" "-NoProfile" "-ExecutionPolicy" 
     Write-Utf8File -Path $launcherPath -Content $batch
 
     try {
+        # cmd.exe receives an ASCII-only relative batch name. The Unicode
+        # session directory is supplied through CreateProcess' working
+        # directory instead of being re-decoded by cmd's active code page.
+        $launcherName = [System.IO.Path]::GetFileName($launcherPath)
         $launcher = Start-ManagedProcess -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') `
-            -ArgumentValues @('/d', '/s', '/c', $launcherPath) `
+            -ArgumentValues @('/d', '/s', '/c', $launcherName) `
             -WorkingDirectory $SessionDirectory -Hidden
         $launcher.WaitForExit()
         if ($launcher.ExitCode -ne 0) {
@@ -1110,7 +1131,7 @@ function Invoke-ConduitSupervisor {
         Throw-ConduitError "session startup data is missing: $Id"
     }
 
-    $request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json
+    $request = (Read-Utf8File -Path $requestPath) | ConvertFrom-Json
     $backend = $null
     $backendKind = $null
     $importedProfile = $null
@@ -1457,7 +1478,7 @@ function Show-ConduitProfiles {
 
     $last = ''
     if (Test-Path -LiteralPath $script:LastProfilePath -PathType Leaf) {
-        $last = (Get-Content -LiteralPath $script:LastProfilePath -Raw).Trim()
+        $last = (Read-Utf8File -Path $script:LastProfilePath).Trim()
     }
 
     $activeProfiles = @{}
@@ -1489,6 +1510,8 @@ function Show-ConduitLogs {
         (Join-Path $directory 'conduit-error.log'),
         (Join-Path $directory 'supervisor.log'),
         (Join-Path $directory 'supervisor-error.log'),
+        (Join-Path $directory 'import.log'),
+        (Join-Path $directory 'import-error.log'),
         (Join-Path $directory 'tunnel.log'),
         (Join-Path $directory 'tunnel-error.log'),
         (Join-Path $directory 'app.log'),

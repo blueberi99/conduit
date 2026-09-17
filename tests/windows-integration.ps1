@@ -7,8 +7,9 @@ $ErrorActionPreference = 'Stop'
 
 $repository = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $scriptPath = Join-Path $repository 'conduit.ps1'
-$fixture = Join-Path $repository 'tests\fixtures\cloudflare\example.conf'
-$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-integration-' + [Guid]::NewGuid().ToString('N'))
+$fixture = Join-Path $repository 'tests\fixtures\Windscribe-Athens-Odeon-WG.conf'
+$testContainer = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-integration-' + [Guid]::NewGuid().ToString('N'))
+$testRoot = Join-Path $testContainer 'Unicode İsim'
 $profileRoot = Join-Path $testRoot 'profiles'
 $stateRoot = Join-Path $testRoot 'state'
 $squirrelRoot = Join-Path $testRoot 'DiscordCanary'
@@ -64,7 +65,7 @@ public static class FakeApplication
 
 try {
     New-Item -ItemType Directory -Path $profileRoot, $appDirectory -Force | Out-Null
-    Copy-Item -LiteralPath $fixture -Destination (Join-Path $profileRoot 'example.conf')
+    Copy-Item -LiteralPath $fixture -Destination (Join-Path $profileRoot 'Windscribe-Athens-Odeon-WG.conf')
     Add-Type -TypeDefinition $backendSource -Language CSharp -OutputAssembly $backendPath -OutputType ConsoleApplication
     Add-Type -TypeDefinition $applicationSource -Language CSharp -OutputAssembly $appPath -OutputType ConsoleApplication
     Copy-Item -LiteralPath $appPath -Destination (Join-Path $squirrelRoot 'Update.exe')
@@ -80,32 +81,40 @@ try {
     Write-Output 'integration: foreground session'
     $ErrorActionPreference = 'Continue'
     $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
-        -f --vpn example discordcanary 2>&1)
+        -f --provider windscribe discordcanary 2>&1)
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     Assert-True ($exitCode -eq 0) "foreground session failed: $($output -join ' ')"
     Assert-True (Test-Path -LiteralPath $capturePath -PathType Leaf) 'backend did not receive the generated profile'
 
-    $captured = Get-Content -LiteralPath $capturePath -Raw
+    $captured = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8
     Assert-True ($captured.Contains("#@ws:AllowedApps = $squirrelRoot")) 'Squirrel app did not use its stable install root'
     Assert-True (-not $captured.Contains("#@ws:AllowedApps = $appPath")) 'versioned executable leaked into AllowedApps'
     Assert-True ($captured.Contains('AllowedIPs = 0.0.0.0/0, ::/0')) 'generated profile does not prevent IPv6 bypass'
     Assert-True ($captured.Contains('Jc = 0')) 'standard WireGuard handshake mode was not pinned'
+    Assert-True ($captured.Contains('Address = 100.122.85.109/32, fd54:4::f920:f547:6137:553e/128')) `
+        'Windscribe dual-stack interface address was not preserved'
+    Assert-True ($captured.Contains('DNS = 10.255.255.2')) 'Windscribe DNS was not preserved'
+    Assert-True ($captured.Contains('Endpoint = otp-105-wg.whiskergalaxy.com:443')) `
+        'Windscribe endpoint was not preserved'
+    Assert-True ($captured.Contains('PresharedKey = CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=')) `
+        'Windscribe preshared key was not preserved'
 
-    $sourceProfile = Get-Content -LiteralPath (Join-Path $profileRoot 'example.conf') -Raw
+    $sourceProfile = Get-Content -LiteralPath (Join-Path $profileRoot 'Windscribe-Athens-Odeon-WG.conf') `
+        -Raw -Encoding UTF8
     Assert-True ($sourceProfile -notmatch 'AllowedApps') 'source VPN profile was modified'
 
     $sessionFile = Get-ChildItem -LiteralPath (Join-Path $stateRoot 'sessions') -Filter 'session.json' -Recurse |
         Select-Object -First 1
     Assert-True ($null -ne $sessionFile) 'session state was not recorded'
-    $session = Get-Content -LiteralPath $sessionFile.FullName -Raw | ConvertFrom-Json
+    $session = Get-Content -LiteralPath $sessionFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-True ($session.State -eq 'stopped') 'completed foreground session was not marked stopped'
     Assert-True (@($session.ProcessNames) -contains 'Update') 'Squirrel updater process is not tracked'
 
     Write-Output 'integration: detached session'
     $ErrorActionPreference = 'Continue'
     $detachedOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
-        --vpn example discordcanary sleep 2>&1)
+        --provider windscribe discordcanary sleep 2>&1)
     $detachedExitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     Assert-True ($detachedExitCode -eq 0) "detached session failed: $($detachedOutput -join ' ')"
@@ -125,7 +134,7 @@ try {
     Write-Output 'Conduit Windows integration test passed.'
 }
 finally {
-    if (Test-Path -LiteralPath $testRoot -PathType Container) {
-        Remove-Item -LiteralPath $testRoot -Recurse -Force
+    if (Test-Path -LiteralPath $testContainer -PathType Container) {
+        Remove-Item -LiteralPath $testContainer -Recurse -Force
     }
 }

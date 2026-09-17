@@ -11,7 +11,7 @@ set -euo pipefail
 # Global configuration
 # =============================================================================
 
-VERSION="3.2.1"
+VERSION="3.2.2"
 
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 
@@ -90,6 +90,7 @@ examples:
   conduit --vpn PDE-778 discord
   conduit --provider proton discord
   conduit --provider cloudflare firefox
+  conduit --provider windscribe discord
 
   conduit -f --provider cloudflare curl https://ifconfig.me
 
@@ -579,6 +580,7 @@ filter_provider() {
     # Legacy flat-layout compatibility.
     #
     # PDE* = Proton
+    # Windscribe-* = Windscribe
     # other top-level configs = Mullvad
     #
     case "$provider" in
@@ -594,12 +596,25 @@ filter_provider() {
             ;;
 
 
+        windscribe)
+            for file in "${ALL_PROFILES[@]}"; do
+                id="$(profile_id "$file")"
+                base="${file##*/}"
+
+                if [[ "$id" != */* && "${base,,}" == windscribe-* ]]; then
+                    CANDIDATES+=("$file")
+                fi
+            done
+            ;;
+
+
         mullvad)
             for file in "${ALL_PROFILES[@]}"; do
                 id="$(profile_id "$file")"
                 base="${file##*/}"
 
-                if [[ "$id" != */* && "$base" != PDE* ]]; then
+                if [[ "$id" != */* && "$base" != PDE* &&
+                    "${base,,}" != windscribe-* ]]; then
                     CANDIDATES+=("$file")
                 fi
             done

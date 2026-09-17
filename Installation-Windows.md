@@ -81,9 +81,17 @@ Profiles use the same layout as Linux:
 │   └── PDE-778-DE-778.conf
 ├── mullvad\
 │   └── de-sto-wg-001.conf
+├── windscribe\
+│   └── Athens-Odeon-WG.conf
 └── cloudflare\
     └── warp.conf
 ```
+
+Windscribe's standard WireGuard export is supported directly. Conduit keeps
+dual-stack `Address` values, `DNS`, `Endpoint`, and `PresharedKey` intact while
+adding only the per-application WireSock filtering required for the session.
+Legacy flat files named `Windscribe-*.conf` are recognized by
+`--provider windscribe` as well.
 
 You can select another directory for the current terminal:
 
@@ -122,6 +130,7 @@ or conflicting sessions.
 conduit discord
 conduit firefox.exe
 conduit --provider proton discord
+conduit --provider windscribe discord
 conduit --vpn de-sto-wg-001 firefox.exe
 conduit -f curl.exe https://ifconfig.me
 ```

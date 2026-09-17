@@ -33,7 +33,7 @@ profile is never modified.
 - Only the selected application uses the VPN
 - A kill switch prevents fallback to the normal connection
 - Random or explicit profile selection
-- Provider folders for Proton, Mullvad, Cloudflare, or any WireGuard provider
+- Provider folders for Proton, Mullvad, Windscribe, Cloudflare, or any WireGuard provider
 - Automatic Cloudflare WARP profile bootstrap
 - One-line Windows installation and Administrator-approved self-update
 - Detached GUI sessions with status, logs, and explicit cleanup
@@ -47,6 +47,7 @@ The common commands are:
 conduit discord
 conduit --vpn mullvad-se firefox
 conduit --provider proton discord
+conduit --provider windscribe discord
 conduit show-vpn
 conduit status
 conduit logs
@@ -117,9 +118,15 @@ vpns/
 │   └── PDE-778-DE-778.conf
 ├── mullvad/
 │   └── de-sto-wg-001.conf
+├── windscribe/
+│   └── Athens-Odeon-WG.conf
 └── cloudflare/
     └── warp.conf
 ```
+
+Standard Windscribe WireGuard profiles are supported, including dual-stack
+`Address` values, provider DNS, and `PresharedKey`. Legacy flat files named
+`Windscribe-*.conf` can also be selected with `--provider windscribe`.
 
 Without `--vpn`, Conduit chooses a random profile and avoids the last-used one
 when another choice exists.
