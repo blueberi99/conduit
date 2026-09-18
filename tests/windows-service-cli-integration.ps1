@@ -94,6 +94,7 @@ try {
     $env:CONDUIT_WIRESOCK = $backendPath
     $env:CONDUIT_STARTUP_DELAY_MS = '250'
     $env:CONDUIT_NO_TASKKILL = '1'
+    $env:CONDUIT_NO_UPDATE_CHECK = '1'
     $env:FAKE_WIRESOCK_CAPTURE = $capturePath
     $env:FAKE_WIRESOCK_STOP = $stopPath
     $env:FAKE_WIRESOCK_DELETED = $deletedPath
@@ -143,6 +144,7 @@ try {
     Write-Output 'Conduit WireSock service CLI integration test passed.'
 }
 finally {
+    Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }

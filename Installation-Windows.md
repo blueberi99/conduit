@@ -138,6 +138,13 @@ conduit -f curl.exe https://ifconfig.me
 Graphical applications detach by default. `-f` keeps a command in the
 foreground and returns its exit code.
 
+Before an application session starts, Conduit checks the official repository's
+small `VERSION` file with a two-second timeout. If a newer release is available,
+it prints a warning recommending `conduit update` and continues the launch.
+Offline, blocked, malformed, or timed-out responses are ignored so this check
+cannot prevent the VPN session. Set `CONDUIT_NO_UPDATE_CHECK=1` to disable the
+check for the current environment.
+
 ### Discord updates
 
 Discord installs its executable below a versioned path such as:

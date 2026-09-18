@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 
 $repository = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $scriptPath = Join-Path $repository 'conduit.ps1'
+$versionPath = Join-Path $repository 'VERSION'
 $fixtureDirectory = Join-Path $repository 'tests\fixtures'
 $stateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-smoke-' + [Guid]::NewGuid().ToString('N'))
 
@@ -39,10 +40,13 @@ function Assert-True {
 try {
     $env:CONDUIT_DIR = $fixtureDirectory
     $env:CONDUIT_STATE_DIR = $stateDirectory
+    $env:CONDUIT_NO_UPDATE_CHECK = '1'
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.3$') 'unexpected version output'
+    Assert-True ($version.Output -match '^conduit 3\.2\.4$') 'unexpected version output'
+    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.4') `
+        'VERSION does not match conduit.ps1'
 
     $noArguments = Invoke-TestCommand @()
     Assert-True ($noArguments.ExitCode -eq 1) 'empty command should show usage and fail'
@@ -53,6 +57,33 @@ try {
     Assert-True ($help.ExitCode -eq 0) 'help command failed'
     Assert-True ($help.Output -match 'isolated per-application VPN sessions for Windows') 'help text is incomplete'
     Assert-True ($help.Output -match 'conduit update') 'help does not list the update command'
+
+    $latestVersionPath = Join-Path $stateDirectory 'latest-version'
+    New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+    [System.IO.File]::WriteAllText($latestVersionPath, '99.0.0', [System.Text.Encoding]::UTF8)
+    $env:CONDUIT_VERSION_URL = ([Uri]$latestVersionPath).AbsoluteUri
+    Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
+    $updateNotice = Invoke-TestCommand @('missing.exe')
+    Assert-True ($updateNotice.ExitCode -eq 1) 'notice test should still reach application resolution'
+    Assert-True ($updateNotice.Output -match "Conduit 99\.0\.0 is available.*conduit update") `
+        'newer published version did not produce an update notice'
+
+    $env:CONDUIT_NO_UPDATE_CHECK = '1'
+    $disabledNotice = Invoke-TestCommand @('missing.exe')
+    Assert-True ($disabledNotice.Output -notmatch 'is available') 'disabled update check still produced a notice'
+
+    Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
+    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.4', [System.Text.Encoding]::UTF8)
+    $currentNotice = Invoke-TestCommand @('missing.exe')
+    Assert-True ($currentNotice.Output -notmatch 'is available') 'current version produced an update notice'
+
+    $env:CONDUIT_VERSION_URL = ([Uri](Join-Path $stateDirectory 'unreachable-version')).AbsoluteUri
+    $unreachableNotice = Invoke-TestCommand @('missing.exe')
+    Assert-True ($unreachableNotice.ExitCode -eq 1) 'unreachable version source changed the normal exit path'
+    Assert-True ($unreachableNotice.Output -match 'application not found') `
+        'unreachable version source blocked application handling'
+    $env:CONDUIT_NO_UPDATE_CHECK = '1'
+    Remove-Item Env:CONDUIT_VERSION_URL
 
     $profiles = Invoke-TestCommand @('show-vpn')
     Assert-True ($profiles.ExitCode -eq 0) 'show-vpn command failed'
@@ -99,6 +130,8 @@ try {
     Write-Output 'Conduit Windows smoke tests passed.'
 }
 finally {
+    Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_VERSION_URL -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $stateDirectory -PathType Container) {
         Remove-Item -LiteralPath $stateDirectory -Recurse -Force
     }

@@ -1,5 +1,13 @@
 # changelog
 
+# Conduit v3.2.4
+
+- Check the official lightweight `VERSION` source before Windows application
+  launches
+- Warn when a newer release is available and recommend `conduit update`
+- Keep launches non-blocking when the version source is offline, malformed, or
+  slow, with `CONDUIT_NO_UPDATE_CHECK=1` available to disable the check
+
 # Conduit v3.2.3
 
 - Detect host or ISP DNS rewriting for Discord before a Windows session starts

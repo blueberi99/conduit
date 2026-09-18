@@ -38,6 +38,7 @@ profile is never modified.
 - One-line Windows installation and Administrator-approved self-update
 - Detached GUI sessions with status, logs, and explicit cleanup
 - Update-safe Discord, Discord PTB, and Discord Canary discovery on Windows
+- A non-blocking update notice when a newer Conduit release is available
 
 ## Usage
 
@@ -102,6 +103,11 @@ Update later with an Administrator/UAC prompt:
 ```powershell
 conduit update
 ```
+
+Application launches briefly check Conduit's official `VERSION` file. When a
+newer release exists, Conduit prints a warning to run `conduit update`; an
+offline or unreachable check never blocks the VPN session. Set
+`CONDUIT_NO_UPDATE_CHECK=1` to disable this check for the current environment.
 
 WireSock Secure Connect is free for personal, educational, and non-profit use;
 commercial use requires an appropriate WireSock license. See

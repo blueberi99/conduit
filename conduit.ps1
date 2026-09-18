@@ -14,10 +14,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.3'
+$script:Version = '3.2.4'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
+$script:VersionUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/VERSION'
 
 $profileOverride = [Environment]::GetEnvironmentVariable('CONDUIT_DIR')
 if ([string]::IsNullOrWhiteSpace($profileOverride)) {
@@ -208,6 +209,60 @@ Set CONDUIT_DIR to override the profile directory.
 Windows uses WireSock Secure Connect as its per-application WireGuard
 backend. One Conduit VPN session may be active at a time on Windows.
 '@ | Write-Output
+}
+
+
+function Show-ConduitUpdateNotice {
+    if ([Environment]::GetEnvironmentVariable('CONDUIT_NO_UPDATE_CHECK') -eq '1') {
+        return
+    }
+
+    $versionUrl = [Environment]::GetEnvironmentVariable('CONDUIT_VERSION_URL')
+    if ([string]::IsNullOrWhiteSpace($versionUrl)) {
+        $versionUrl = $script:VersionUrl
+    }
+
+    try {
+        [Uri]$uri = $null
+        if (-not [Uri]::TryCreate($versionUrl, [UriKind]::Absolute, [ref]$uri)) {
+            return
+        }
+
+        $latestText = ''
+        if ($uri.Scheme -eq 'file') {
+            $latestText = [System.IO.File]::ReadAllText($uri.LocalPath, [System.Text.Encoding]::UTF8)
+        }
+        elseif ($uri.Scheme -eq 'https') {
+            $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = `
+                    $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -TimeoutSec 2
+                $latestText = [string]$response.Content
+            }
+            finally {
+                [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+            }
+        }
+        else {
+            return
+        }
+
+        $latestText = $latestText.Trim()
+        if ($latestText -notmatch '^\d+\.\d+\.\d+$') {
+            return
+        }
+
+        $latestVersion = [Version]$latestText
+        $currentVersion = [Version]$script:Version
+        if ($latestVersion -gt $currentVersion) {
+            Write-Warning "Conduit $latestVersion is available (current $currentVersion). Run 'conduit update' when no session is active."
+        }
+    }
+    catch {
+        # Version checks must never delay or prevent a VPN session. The launch
+        # continues silently when the endpoint is offline or returns bad data.
+    }
 }
 
 
@@ -2113,6 +2168,7 @@ function Invoke-Conduit {
         Throw-ConduitError 'an application command is required'
     }
 
+    Show-ConduitUpdateNotice
     $profile = Select-ConduitProfile -Vpn $vpn -Provider $provider
     $application = Resolve-ConduitApplication -Command $values[$index]
     $applicationArguments = @()
