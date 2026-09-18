@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.2'
+$script:Version = '3.2.3'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -563,6 +563,91 @@ function Resolve-ConduitApplication {
         ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($resolved)
         ProcessNames = @($processNames)
         AllowedApp  = $allowedApp
+    }
+}
+
+
+function Resolve-ConduitDnsIPv4 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [AllowEmptyString()][string] $Server = ''
+    )
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($Server)) {
+            $records = @(Resolve-DnsName -Name $Name -Type A -DnsOnly -QuickTimeout -ErrorAction Stop)
+        }
+        else {
+            $records = @(
+                Resolve-DnsName -Name $Name -Server $Server -Type A -DnsOnly -QuickTimeout -ErrorAction Stop
+            )
+        }
+        return @(
+            $records |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.IPAddress) } |
+                ForEach-Object { [string]$_.IPAddress } |
+                Sort-Object -Unique
+        )
+    }
+    catch {
+        return @()
+    }
+}
+
+
+function Get-DiscordDnsHealth {
+    if ($null -eq (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{
+            State   = 'unverified'
+            Message = 'Resolve-DnsName is unavailable on this Windows installation'
+        }
+    }
+
+    $domains = @('discord.com', 'updates.discord.com')
+    $mismatches = 0
+    $verified = 0
+
+    foreach ($domain in $domains) {
+        $systemAddresses = @(Resolve-ConduitDnsIPv4 -Name $domain)
+        if ($systemAddresses.Count -eq 0) {
+            return [pscustomobject]@{
+                State   = 'unavailable'
+                Message = "Windows DNS could not resolve $domain"
+            }
+        }
+
+        $trustedAddresses = @(Resolve-ConduitDnsIPv4 -Name $domain -Server '1.1.1.1')
+        if ($trustedAddresses.Count -eq 0) {
+            $trustedAddresses = @(Resolve-ConduitDnsIPv4 -Name $domain -Server '8.8.8.8')
+        }
+        if ($trustedAddresses.Count -eq 0) {
+            continue
+        }
+
+        $verified++
+        $overlap = @($systemAddresses | Where-Object { $trustedAddresses -contains $_ })
+        if ($overlap.Count -eq 0) {
+            $mismatches++
+        }
+    }
+
+    if ($verified -eq $domains.Count -and $mismatches -eq $domains.Count) {
+        return [pscustomobject]@{
+            State   = 'rewritten'
+            Message = 'Windows DNS answers for Discord differ from trusted public resolvers'
+        }
+    }
+
+    if ($verified -eq 0) {
+        return [pscustomobject]@{
+            State   = 'unverified'
+            Message = 'trusted DNS resolvers could not be reached for comparison'
+        }
+    }
+
+    return [pscustomobject]@{
+        State   = 'ok'
+        Message = 'Discord DNS answers match a trusted public resolver'
     }
 }
 
@@ -1162,7 +1247,6 @@ function Invoke-ConduitSupervisor {
 
         $networkLock = [Environment]::GetEnvironmentVariable('CONDUIT_NETWORK_LOCK')
         $lockMode = if ($networkLock -eq '0' -or $networkLock -ieq 'false') { 'disabled' } else { 'enabled' }
-
         $tunnelOut = Join-Path $directory 'tunnel.log'
         $tunnelErr = Join-Path $directory 'tunnel-error.log'
         if ($backendKind -eq 'service-cli') {
@@ -1343,6 +1427,18 @@ function Start-ConduitSession {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ApplicationArguments,
         [Parameter(Mandatory = $true)][bool] $Detach
     )
+
+    if ($Application.ProcessName -match '^(?i:Discord(?:PTB|Canary)?)$') {
+        $dnsHealth = Get-DiscordDnsHealth
+        if ($dnsHealth.State -eq 'rewritten') {
+            Throw-ConduitError ('Windows DNS appears to rewrite Discord addresses before WireSock can apply ' +
+                "per-application filtering. Configure a trusted system DNS resolver such as " +
+                "1.1.1.1/1.0.0.1, flush the DNS cache, and retry. Run 'conduit doctor' for details")
+        }
+        if ($dnsHealth.State -eq 'unavailable') {
+            Throw-ConduitError "$($dnsHealth.Message); fix Windows DNS and retry"
+        }
+    }
 
     Initialize-ConduitState
     $launchLock = $null
@@ -1678,6 +1774,20 @@ function Invoke-ConduitDoctor {
         }
         else {
             Write-Output '[WARN] wg.exe is required only for WARP bootstrap (install WireGuard for Windows)'
+        }
+    }
+
+    if ($null -ne (Find-SquirrelApplication -Command 'discord')) {
+        $dnsHealth = Get-DiscordDnsHealth
+        if ($dnsHealth.State -eq 'ok') {
+            Write-Output '[OK]   Discord DNS answers match a trusted public resolver'
+        }
+        elseif ($dnsHealth.State -eq 'rewritten') {
+            Write-Output '[FAIL] Windows DNS appears to rewrite Discord addresses; configure a trusted system resolver such as 1.1.1.1/1.0.0.1'
+            $failures++
+        }
+        else {
+            Write-Output "[WARN] Discord DNS check: $($dnsHealth.Message)"
         }
     }
 

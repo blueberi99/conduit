@@ -1,5 +1,13 @@
 # changelog
 
+# Conduit v3.2.3
+
+- Detect host or ISP DNS rewriting for Discord before a Windows session starts
+- Stop with an actionable DNS remediation instead of retrying valid VPN
+  profiles against a block-page address
+- Report Discord DNS health from `conduit doctor` when Discord is installed
+- Keep host DNS changes explicit because they affect the whole Windows system
+
 # Conduit v3.2.2
 
 - Preserve non-ASCII user, application, state, and profile paths under Windows

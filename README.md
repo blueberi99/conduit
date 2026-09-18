@@ -141,6 +141,13 @@ Discord's Windows executable lives in a changing `app-<version>` directory.
 Conduit resolves the newest executable at launch and filters the stable Discord
 installation root, so Discord updates do not invalidate the VPN rule.
 
+Windows resolves hostnames before WireSock's per-application filter sees the
+result. Conduit compares Discord DNS answers with a trusted public resolver and
+fails early with a specific remediation message if the host or ISP resolver is
+rewriting them. This prevents a connected WireGuard tunnel from silently
+sending Discord to a block-page address. `conduit doctor` reports the same
+condition. Conduit does not change system DNS settings automatically.
+
 ## License
 
 AGPLv3. Derivatives must remain open source under the same license and preserve

@@ -161,6 +161,20 @@ Close an already-running Discord instance before starting it through Conduit.
 This gives Conduit an unambiguous application lifecycle and prevents the
 existing process from escaping session management.
 
+### Host DNS rewriting
+
+Windows can resolve Discord through the host DNS service before WireSock's
+per-application filter sees the connection. Some ISP or router resolvers return
+a block-page address even though the WireGuard tunnel itself connects.
+
+Conduit compares `discord.com` and `updates.discord.com` with a trusted public
+resolver before launching Discord. If both answers are being rewritten, launch
+stops with a specific DNS error instead of cycling through healthy VPN profiles.
+Set a trusted system resolver such as Cloudflare (`1.1.1.1`, `1.0.0.1`) or
+Google (`8.8.8.8`, `8.8.4.4`), flush the Windows DNS cache, and retry. Conduit
+does not change system DNS automatically because that setting affects every
+application and may be managed by an organization.
+
 ## 6. Manage a session
 
 ```powershell

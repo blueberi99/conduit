@@ -42,7 +42,7 @@ try {
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.2$') 'unexpected version output'
+    Assert-True ($version.Output -match '^conduit 3\.2\.3$') 'unexpected version output'
 
     $noArguments = Invoke-TestCommand @()
     Assert-True ($noArguments.ExitCode -eq 1) 'empty command should show usage and fail'
