@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.4'
+$script:Version = '3.2.5'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -188,6 +188,10 @@ management:
   conduit doctor
   conduit bootstrap
   conduit update
+  conduit add shortcut <application>
+  conduit remove shortcut <application>
+  conduit add startup <application>
+  conduit remove startup <application>
   conduit logs [session]
   conduit kill [session]
   conduit kill --all
@@ -199,6 +203,8 @@ examples:
   conduit --provider mullvad firefox.exe
   conduit --provider windscribe discord.exe
   conduit -f curl.exe https://ifconfig.me
+  conduit add shortcut discord
+  conduit add startup discord
 
 profile layout:
   %USERPROFILE%\vpns\*.conf
@@ -1080,6 +1086,138 @@ function ConvertTo-NativeArgument {
 function Join-NativeArguments {
     param([object[]] $Values)
     return (($Values | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
+}
+
+
+function Get-ConduitLauncherPath {
+    $override = [Environment]::GetEnvironmentVariable('CONDUIT_LAUNCHER')
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        if (Test-Path -LiteralPath $override -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $override).Path
+        }
+        Throw-ConduitError "CONDUIT_LAUNCHER does not exist: $override"
+    }
+
+    $launcher = Join-Path (Split-Path -Parent $script:SelfPath) 'conduit.cmd'
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+        Throw-ConduitError "Conduit launcher not found beside $script:SelfPath; reinstall Conduit and retry"
+    }
+    return (Resolve-Path -LiteralPath $launcher).Path
+}
+
+
+function Get-ConduitShortcutIdentity {
+    param([Parameter(Mandatory = $true)][string] $Application)
+
+    if ($Application -notmatch '^[A-Za-z0-9._-]+$') {
+        Throw-ConduitError 'shortcut application must be a command name such as discord or firefox.exe'
+    }
+
+    $key = [System.IO.Path]::GetFileNameWithoutExtension($Application).ToLowerInvariant()
+    $label = switch ($key) {
+        'discord' { 'Discord'; break }
+        'discordptb' { 'Discord PTB'; break }
+        'discordcanary' { 'Discord Canary'; break }
+        default {
+            if ($key.Length -eq 0) {
+                Throw-ConduitError 'shortcut application name is empty'
+            }
+            $key.Substring(0, 1).ToUpperInvariant() + $key.Substring(1)
+        }
+    }
+
+    return [pscustomobject]@{
+        Application = $Application
+        Label       = $label
+        FileName    = "Conduit - $label.lnk"
+    }
+}
+
+
+function Get-ConduitShortcutDirectory {
+    param([Parameter(Mandatory = $true)][ValidateSet('shortcut', 'startup')][string] $Kind)
+
+    $environmentName = if ($Kind -eq 'shortcut') { 'CONDUIT_DESKTOP_DIR' } else { 'CONDUIT_STARTUP_DIR' }
+    $override = [Environment]::GetEnvironmentVariable($environmentName)
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        return [System.IO.Path]::GetFullPath($override)
+    }
+
+    $specialFolder = if ($Kind -eq 'shortcut') { 'DesktopDirectory' } else { 'Startup' }
+    $directory = [Environment]::GetFolderPath($specialFolder)
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        Throw-ConduitError "Windows could not locate the $Kind folder"
+    }
+    return $directory
+}
+
+
+function Add-ConduitShortcut {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('shortcut', 'startup')][string] $Kind,
+        [Parameter(Mandatory = $true)][string] $Application
+    )
+
+    $identity = Get-ConduitShortcutIdentity -Application $Application
+    $launcher = Get-ConduitLauncherPath
+    $resolvedApplication = Resolve-ConduitApplication -Command $Application
+    $directory = Get-ConduitShortcutDirectory -Kind $Kind
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+
+    $path = Join-Path $directory $identity.FileName
+    $temporaryPath = Join-Path $directory ('.conduit-{0}.lnk' -f [Guid]::NewGuid().ToString('N'))
+    $wasExisting = Test-Path -LiteralPath $path -PathType Leaf
+    $shell = $null
+    $shortcut = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($temporaryPath)
+        $shortcut.TargetPath = $launcher
+        $shortcut.Arguments = Join-NativeArguments @($identity.Application)
+        $shortcut.WorkingDirectory = Split-Path -Parent $launcher
+        $shortcut.IconLocation = "$($resolvedApplication.Path),0"
+        $shortcut.Description = "Launch $($identity.Label) through Conduit VPN"
+        $shortcut.WindowStyle = 7
+        $shortcut.Save()
+        if (-not (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+            Throw-ConduitError "Windows did not create the shortcut: $temporaryPath"
+        }
+        Copy-Item -LiteralPath $temporaryPath -Destination $path -Force
+    }
+    catch {
+        Throw-ConduitError "could not create the Conduit $Kind for $($identity.Label): $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $shortcut -and [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)
+        }
+        if ($null -ne $shell -and [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+        }
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $verb = if ($wasExisting) { 'Replaced' } else { 'Created' }
+    Write-Output "$verb Conduit $kind for $($identity.Label): $path"
+}
+
+
+function Remove-ConduitShortcut {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('shortcut', 'startup')][string] $Kind,
+        [Parameter(Mandatory = $true)][string] $Application
+    )
+
+    $identity = Get-ConduitShortcutIdentity -Application $Application
+    $directory = Get-ConduitShortcutDirectory -Kind $Kind
+    $path = Join-Path $directory $identity.FileName
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Write-Output "No Conduit $kind exists for $($identity.Label): $path"
+        return
+    }
+
+    Remove-Item -LiteralPath $path -Force
+    Write-Output "Removed Conduit $kind for $($identity.Label): $path"
 }
 
 
@@ -2085,6 +2223,20 @@ function Invoke-Conduit {
         'update' {
             if ($values.Count -ne 1) { Throw-ConduitError 'usage: conduit update' }
             Invoke-ConduitUpdate
+            return
+        }
+        'add' {
+            if ($values.Count -ne 3 -or $values[1] -notin @('shortcut', 'startup')) {
+                Throw-ConduitError 'usage: conduit add <shortcut|startup> <application>'
+            }
+            Add-ConduitShortcut -Kind $values[1] -Application $values[2]
+            return
+        }
+        'remove' {
+            if ($values.Count -ne 3 -or $values[1] -notin @('shortcut', 'startup')) {
+                Throw-ConduitError 'usage: conduit remove <shortcut|startup> <application>'
+            }
+            Remove-ConduitShortcut -Kind $values[1] -Application $values[2]
             return
         }
         'logs' {

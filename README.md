@@ -39,6 +39,7 @@ profile is never modified.
 - Detached GUI sessions with status, logs, and explicit cleanup
 - Update-safe Discord, Discord PTB, and Discord Canary discovery on Windows
 - A non-blocking update notice when a newer Conduit release is available
+- Managed Windows desktop and login-startup shortcuts for tunneled applications
 
 ## Usage
 
@@ -54,6 +55,10 @@ conduit status
 conduit logs
 conduit kill
 conduit kill --all
+conduit add shortcut discord
+conduit remove shortcut discord
+conduit add startup discord
+conduit remove startup discord
 ```
 
 Use `conduit --help` for platform-specific details.
@@ -108,6 +113,13 @@ Application launches briefly check Conduit's official `VERSION` file. When a
 newer release exists, Conduit prints a warning to run `conduit update`; an
 offline or unreachable check never blocks the VPN session. Set
 `CONDUIT_NO_UPDATE_CHECK=1` to disable this check for the current environment.
+
+On Windows, `add shortcut` creates a clearly named `Conduit - <App>` shortcut
+on the current user's desktop. `add startup` creates the same managed shortcut
+in the current user's Startup folder so the application launches through
+Conduit at sign-in. Re-adding replaces only the matching Conduit shortcut;
+`remove shortcut` and `remove startup` remove only that managed entry, never the
+application's original shortcut.
 
 WireSock Secure Connect is free for personal, educational, and non-profit use;
 commercial use requires an appropriate WireSock license. See

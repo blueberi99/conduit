@@ -26,6 +26,44 @@ if ([string]::IsNullOrWhiteSpace($profileDirectory)) {
     $profileDirectory = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'vpns'
 }
 
+function Remove-ConduitManagedShortcuts {
+    $launcher = Join-Path $installDirectory 'conduit.cmd'
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($folderName in @('DesktopDirectory', 'Startup')) {
+            $folder = [Environment]::GetFolderPath($folderName)
+            if ([string]::IsNullOrWhiteSpace($folder) -or
+                -not (Test-Path -LiteralPath $folder -PathType Container)) {
+                continue
+            }
+
+            foreach ($file in Get-ChildItem -LiteralPath $folder -Filter 'Conduit - *.lnk' -File -ErrorAction SilentlyContinue) {
+                $shortcut = $null
+                try {
+                    $shortcut = $shell.CreateShortcut($file.FullName)
+                    if ($shortcut.TargetPath -ieq $launcher) {
+                        Remove-Item -LiteralPath $file.FullName -Force
+                    }
+                }
+                catch {
+                    Write-Warning "Could not inspect managed shortcut $($file.FullName): $($_.Exception.Message)"
+                }
+                finally {
+                    if ($null -ne $shortcut -and [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) {
+                        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        if ($null -ne $shell -and [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+        }
+    }
+}
+
 Write-Output 'Conduit uninstaller for Windows'
 Write-Output 'VPN profiles will NOT be deleted.'
 Write-Output ''
@@ -43,6 +81,8 @@ $parts = @($userPath -split ';' | Where-Object {
         $_.TrimEnd('\') -ine $installDirectory.TrimEnd('\')
 })
 [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
+
+Remove-ConduitManagedShortcuts
 
 foreach ($name in @('conduit-main.ps1', 'conduit.ps1', 'conduit.cmd')) {
     Remove-Item -LiteralPath (Join-Path $installDirectory $name) -Force -ErrorAction SilentlyContinue

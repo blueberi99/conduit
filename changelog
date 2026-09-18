@@ -1,5 +1,15 @@
 # changelog
 
+# Conduit v3.2.5
+
+- Add `conduit add shortcut <application>` for managed desktop shortcuts
+- Add `conduit add startup <application>` for current-user login startup
+- Add matching `remove shortcut` and `remove startup` commands
+- Replace or remove only `Conduit - <App>.lnk`, preserving the application's
+  original shortcuts
+- Clean up managed Conduit links during uninstall while preserving unrelated
+  shortcuts
+
 # Conduit v3.2.4
 
 - Check the official lightweight `VERSION` source before Windows application

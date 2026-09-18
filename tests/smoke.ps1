@@ -10,6 +10,8 @@ $scriptPath = Join-Path $repository 'conduit.ps1'
 $versionPath = Join-Path $repository 'VERSION'
 $fixtureDirectory = Join-Path $repository 'tests\fixtures'
 $stateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-smoke-' + [Guid]::NewGuid().ToString('N'))
+$desktopDirectory = Join-Path $stateDirectory 'Desktop'
+$startupDirectory = Join-Path $stateDirectory 'Startup'
 
 function Invoke-TestCommand {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments)
@@ -41,11 +43,13 @@ try {
     $env:CONDUIT_DIR = $fixtureDirectory
     $env:CONDUIT_STATE_DIR = $stateDirectory
     $env:CONDUIT_NO_UPDATE_CHECK = '1'
+    $env:CONDUIT_DESKTOP_DIR = $desktopDirectory
+    $env:CONDUIT_STARTUP_DIR = $startupDirectory
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.4$') 'unexpected version output'
-    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.4') `
+    Assert-True ($version.Output -match '^conduit 3\.2\.5$') 'unexpected version output'
+    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.5') `
         'VERSION does not match conduit.ps1'
 
     $noArguments = Invoke-TestCommand @()
@@ -57,6 +61,68 @@ try {
     Assert-True ($help.ExitCode -eq 0) 'help command failed'
     Assert-True ($help.Output -match 'isolated per-application VPN sessions for Windows') 'help text is incomplete'
     Assert-True ($help.Output -match 'conduit update') 'help does not list the update command'
+    Assert-True ($help.Output -match 'conduit add shortcut <application>') `
+        'help does not list managed shortcuts'
+
+    New-Item -ItemType Directory -Path $desktopDirectory, $startupDirectory -Force | Out-Null
+    $realDiscordShortcut = Join-Path $desktopDirectory 'Discord.lnk'
+    [System.IO.File]::WriteAllText($realDiscordShortcut, 'unrelated Discord shortcut', [System.Text.Encoding]::UTF8)
+
+    $addShortcut = Invoke-TestCommand @('add', 'shortcut', 'powershell.exe')
+    Assert-True ($addShortcut.ExitCode -eq 0) "desktop shortcut creation failed: $($addShortcut.Output)"
+    $managedDesktopShortcut = Join-Path $desktopDirectory 'Conduit - Powershell.lnk'
+    Assert-True (Test-Path -LiteralPath $managedDesktopShortcut -PathType Leaf) `
+        'managed desktop shortcut was not created'
+    Assert-True ((Get-Content -LiteralPath $realDiscordShortcut -Raw -Encoding UTF8) -eq 'unrelated Discord shortcut') `
+        'unrelated Discord shortcut was modified'
+
+    $shortcutShell = New-Object -ComObject WScript.Shell
+    $desktopLink = $null
+    try {
+        $desktopLink = $shortcutShell.CreateShortcut($managedDesktopShortcut)
+        Assert-True ([System.IO.Path]::GetFileName($desktopLink.TargetPath) -ieq 'conduit.cmd') `
+            'desktop shortcut does not target Conduit'
+        Assert-True ($desktopLink.Arguments -eq 'powershell.exe') `
+            'desktop shortcut does not launch the requested application'
+    }
+    finally {
+        if ($null -ne $desktopLink -and [Runtime.InteropServices.Marshal]::IsComObject($desktopLink)) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($desktopLink)
+        }
+        if ([Runtime.InteropServices.Marshal]::IsComObject($shortcutShell)) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcutShell)
+        }
+    }
+
+    $replaceShortcut = Invoke-TestCommand @('add', 'shortcut', 'powershell.exe')
+    Assert-True ($replaceShortcut.ExitCode -eq 0) 'existing desktop shortcut replacement failed'
+    Assert-True ($replaceShortcut.Output -match '^Replaced Conduit shortcut') `
+        'existing desktop shortcut was not reported as replaced'
+
+    $addStartup = Invoke-TestCommand @('add', 'startup', 'powershell.exe')
+    Assert-True ($addStartup.ExitCode -eq 0) "startup shortcut creation failed: $($addStartup.Output)"
+    $managedStartupShortcut = Join-Path $startupDirectory 'Conduit - Powershell.lnk'
+    Assert-True (Test-Path -LiteralPath $managedStartupShortcut -PathType Leaf) `
+        'managed startup shortcut was not created'
+
+    $removeStartup = Invoke-TestCommand @('remove', 'startup', 'powershell.exe')
+    Assert-True ($removeStartup.ExitCode -eq 0) 'startup shortcut removal failed'
+    Assert-True (-not (Test-Path -LiteralPath $managedStartupShortcut)) `
+        'managed startup shortcut was not removed'
+    $removeMissingStartup = Invoke-TestCommand @('remove', 'startup', 'powershell.exe')
+    Assert-True ($removeMissingStartup.ExitCode -eq 0) 'removing an absent startup shortcut should be harmless'
+
+    $removeShortcut = Invoke-TestCommand @('remove', 'shortcut', 'powershell.exe')
+    Assert-True ($removeShortcut.ExitCode -eq 0) 'desktop shortcut removal failed'
+    Assert-True (-not (Test-Path -LiteralPath $managedDesktopShortcut)) `
+        'managed desktop shortcut was not removed'
+    Assert-True (Test-Path -LiteralPath $realDiscordShortcut -PathType Leaf) `
+        'removing a Conduit shortcut removed the unrelated Discord shortcut'
+
+    $unsafeShortcut = Invoke-TestCommand @('add', 'shortcut', 'discord&calc')
+    Assert-True ($unsafeShortcut.ExitCode -eq 1) 'unsafe shortcut application name should fail'
+    Assert-True ($unsafeShortcut.Output -match 'must be a command name') `
+        'unsafe shortcut application error is unclear'
 
     $latestVersionPath = Join-Path $stateDirectory 'latest-version'
     New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
@@ -73,7 +139,7 @@ try {
     Assert-True ($disabledNotice.Output -notmatch 'is available') 'disabled update check still produced a notice'
 
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
-    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.4', [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.5', [System.Text.Encoding]::UTF8)
     $currentNotice = Invoke-TestCommand @('missing.exe')
     Assert-True ($currentNotice.Output -notmatch 'is available') 'current version produced an update notice'
 
@@ -132,6 +198,8 @@ try {
 finally {
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_VERSION_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_DESKTOP_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_STARTUP_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $stateDirectory -PathType Container) {
         Remove-Item -LiteralPath $stateDirectory -Recurse -Force
     }

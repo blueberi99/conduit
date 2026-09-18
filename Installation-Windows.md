@@ -145,6 +145,33 @@ Offline, blocked, malformed, or timed-out responses are ignored so this check
 cannot prevent the VPN session. Set `CONDUIT_NO_UPDATE_CHECK=1` to disable the
 check for the current environment.
 
+### Desktop and startup shortcuts
+
+Create or refresh a desktop shortcut that always launches an application
+through Conduit:
+
+```powershell
+conduit add shortcut discord
+```
+
+Create a login-startup entry, or remove it later:
+
+```powershell
+conduit add startup discord
+conduit remove startup discord
+```
+
+Desktop shortcuts can likewise be removed with:
+
+```powershell
+conduit remove shortcut discord
+```
+
+Managed links are named `Conduit - <App>.lnk`. Adding an existing entry replaces
+only that exact Conduit link. Removing one never deletes Discord's or another
+application's original shortcut. Startup entries are created for the current
+Windows user and launch the same `conduit <application>` command at sign-in.
+
 ### Discord updates
 
 Discord installs its executable below a versioned path such as:
@@ -231,8 +258,10 @@ From an Administrator PowerShell in the repository:
 .\uninstall.ps1
 ```
 
-The uninstaller removes Conduit and its generated session state. It preserves
-the VPN profiles under `%USERPROFILE%\vpns` and does not uninstall WireSock.
+The uninstaller removes Conduit, its generated session state, and managed
+desktop/startup shortcuts that still target Conduit's installed launcher. It
+preserves the VPN profiles under `%USERPROFILE%\vpns`, unrelated application
+shortcuts, and WireSock.
 
 ## WireSock trust boundary
 

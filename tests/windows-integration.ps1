@@ -14,7 +14,9 @@ $profileRoot = Join-Path $testRoot 'profiles'
 $stateRoot = Join-Path $testRoot 'state'
 $squirrelRoot = Join-Path $testRoot 'DiscordCanary'
 $appDirectory = Join-Path $squirrelRoot 'app-2.0.1'
-$appPath = Join-Path $appDirectory 'DiscordCanary.exe'
+$appPath = Join-Path $appDirectory 'TestCanary.exe'
+$discordCanaryPath = Join-Path $appDirectory 'DiscordCanary.exe'
+$shortcutDirectory = Join-Path $testRoot 'Desktop'
 $backendPath = Join-Path $testRoot 'fake-wiresock.exe'
 $capturePath = Join-Path $testRoot 'captured.conf'
 
@@ -68,6 +70,7 @@ try {
     Copy-Item -LiteralPath $fixture -Destination (Join-Path $profileRoot 'Windscribe-Athens-Odeon-WG.conf')
     Add-Type -TypeDefinition $backendSource -Language CSharp -OutputAssembly $backendPath -OutputType ConsoleApplication
     Add-Type -TypeDefinition $applicationSource -Language CSharp -OutputAssembly $appPath -OutputType ConsoleApplication
+    Copy-Item -LiteralPath $appPath -Destination $discordCanaryPath
     Copy-Item -LiteralPath $appPath -Destination (Join-Path $squirrelRoot 'Update.exe')
 
     $env:CONDUIT_DIR = $profileRoot
@@ -76,13 +79,22 @@ try {
     $env:CONDUIT_STARTUP_DELAY_MS = '250'
     $env:CONDUIT_NO_TASKKILL = '1'
     $env:CONDUIT_NO_UPDATE_CHECK = '1'
+    $env:CONDUIT_DESKTOP_DIR = $shortcutDirectory
     $env:FAKE_WIRESOCK_CAPTURE = $capturePath
     $env:LOCALAPPDATA = $testRoot
+
+    Write-Output 'integration: Discord Canary discovery'
+    $shortcutOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        add shortcut discordcanary 2>&1)
+    $shortcutExitCode = $LASTEXITCODE
+    Assert-True ($shortcutExitCode -eq 0) "Discord Canary discovery failed: $($shortcutOutput -join ' ')"
+    Assert-True (Test-Path -LiteralPath (Join-Path $shortcutDirectory 'Conduit - Discord Canary.lnk') -PathType Leaf) `
+        'Discord Canary discovery did not create the managed shortcut'
 
     Write-Output 'integration: foreground session'
     $ErrorActionPreference = 'Continue'
     $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
-        -f --provider windscribe discordcanary 2>&1)
+        -f --provider windscribe $appPath 2>&1)
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     Assert-True ($exitCode -eq 0) "foreground session failed: $($output -join ' ')"
@@ -115,7 +127,7 @@ try {
     Write-Output 'integration: detached session'
     $ErrorActionPreference = 'Continue'
     $detachedOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
-        --provider windscribe discordcanary sleep 2>&1)
+        --provider windscribe $appPath sleep 2>&1)
     $detachedExitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     Assert-True ($detachedExitCode -eq 0) "detached session failed: $($detachedOutput -join ' ')"
@@ -136,6 +148,7 @@ try {
 }
 finally {
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_DESKTOP_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testContainer -PathType Container) {
         Remove-Item -LiteralPath $testContainer -Recurse -Force
     }
