@@ -17,6 +17,7 @@ $appDirectory = Join-Path $squirrelRoot 'app-2.0.1'
 $appPath = Join-Path $appDirectory 'TestCanary.exe'
 $discordCanaryPath = Join-Path $appDirectory 'DiscordCanary.exe'
 $shortcutDirectory = Join-Path $testRoot 'Desktop'
+$startMenuDirectory = Join-Path $testRoot 'Start Menu\Programs'
 $startupDirectory = Join-Path $testRoot 'Startup'
 $stableIconPath = Join-Path $squirrelRoot 'app.ico'
 $backendPath = Join-Path $testRoot 'fake-wiresock.exe'
@@ -87,6 +88,7 @@ try {
     $env:CONDUIT_NO_TASKKILL = '1'
     $env:CONDUIT_NO_UPDATE_CHECK = '1'
     $env:CONDUIT_DESKTOP_DIR = $shortcutDirectory
+    $env:CONDUIT_START_MENU_DIR = $startMenuDirectory
     $env:CONDUIT_STARTUP_DIR = $startupDirectory
     $env:FAKE_WIRESOCK_CAPTURE = $capturePath
     $env:LOCALAPPDATA = $testRoot
@@ -102,12 +104,12 @@ try {
     $startupOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
         add startup discordcanary 2>&1)
     Assert-True ($LASTEXITCODE -eq 0) "Startup icon setup failed: $($startupOutput -join ' ')"
-    # An app update removes the old Discord executable; both shortcut icons
+    # An app update removes the old Discord executable; all shortcut icons
     # must still point at a valid file outside that versioned directory.
     Remove-Item -LiteralPath $discordCanaryPath -Force
     $shell = New-Object -ComObject WScript.Shell
     try {
-        foreach ($folder in @($shortcutDirectory, $startupDirectory)) {
+        foreach ($folder in @($shortcutDirectory, $startMenuDirectory, $startupDirectory)) {
             $link = $shell.CreateShortcut((Join-Path $folder 'Conduit - Discord Canary.lnk'))
             try {
                 Assert-True ($link.IconLocation -ceq ($stableIconPath + ',0')) `
@@ -179,6 +181,7 @@ try {
 finally {
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_DESKTOP_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_START_MENU_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_STARTUP_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testContainer -PathType Container) {
         Remove-Item -LiteralPath $testContainer -Recurse -Force

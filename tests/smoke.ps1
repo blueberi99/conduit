@@ -11,6 +11,7 @@ $versionPath = Join-Path $repository 'VERSION'
 $fixtureDirectory = Join-Path $repository 'tests\fixtures'
 $stateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('conduit-smoke-' + [Guid]::NewGuid().ToString('N'))
 $desktopDirectory = Join-Path $stateDirectory 'Desktop'
+$startMenuDirectory = Join-Path $stateDirectory 'Start Menu\Programs'
 $startupDirectory = Join-Path $stateDirectory 'Startup'
 
 function Invoke-TestCommand {
@@ -44,12 +45,13 @@ try {
     $env:CONDUIT_STATE_DIR = $stateDirectory
     $env:CONDUIT_NO_UPDATE_CHECK = '1'
     $env:CONDUIT_DESKTOP_DIR = $desktopDirectory
+    $env:CONDUIT_START_MENU_DIR = $startMenuDirectory
     $env:CONDUIT_STARTUP_DIR = $startupDirectory
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.6$') 'unexpected version output'
-    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.6') `
+    Assert-True ($version.Output -match '^conduit 3\.2\.7$') 'unexpected version output'
+    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.7') `
         'VERSION does not match conduit.ps1'
 
     $noArguments = Invoke-TestCommand @()
@@ -63,6 +65,7 @@ try {
     Assert-True ($help.Output -match 'conduit update') 'help does not list the update command'
     Assert-True ($help.Output -match 'conduit add shortcut <application>') `
         'help does not list managed shortcuts'
+    Assert-True ($help.Output -match 'both Desktop and Start Menu') 'help does not explain Start Menu shortcuts'
 
     # Simulate the Windows folder API returning an empty result for a missing
     # redirected directory. Substitute only this external API in the actual
@@ -99,13 +102,18 @@ public static class ConduitFolderTestEnvironment {
         [ConduitFolderTestEnvironment]::Folder = $startupDirectory
         Assert-True ((Get-ConduitShortcutDirectory -Kind startup) -ceq $startupDirectory) `
             'missing startup path was lost'
+        [ConduitFolderTestEnvironment]::Folder = $startMenuDirectory
+        Assert-True ((Get-ConduitShortcutDirectory -Kind start-menu) -ceq $startMenuDirectory) `
+            'missing Start Menu path was lost'
         # Exercise the fallback when the Windows folder API cannot return a path.
         function Get-ItemProperty { param($LiteralPath, $Name, $ErrorAction)
-            return [pscustomobject]@{ Desktop = $desktopDirectory; Startup = $startupDirectory }
+            return [pscustomobject]@{ Desktop = $desktopDirectory; Programs = $startMenuDirectory; Startup = $startupDirectory }
         }
         [ConduitFolderTestEnvironment]::Folder = ''
         Assert-True ((Get-ConduitShortcutDirectory -Kind shortcut) -ceq $desktopDirectory) `
             'configured registry desktop fallback was lost'
+        Assert-True ((Get-ConduitShortcutDirectory -Kind start-menu) -ceq $startMenuDirectory) `
+            'configured registry Start Menu fallback was lost'
     }
     $desktopDirectory = Join-Path $stateDirectory 'Redirected Desktop\Desktop'
     $env:CONDUIT_DESKTOP_DIR = $desktopDirectory
@@ -113,27 +121,38 @@ public static class ConduitFolderTestEnvironment {
     Assert-True ($addMissingDesktop.ExitCode -eq 0) "missing desktop creation failed: $($addMissingDesktop.Output)"
     Assert-True (Test-Path -LiteralPath $desktopDirectory -PathType Container) `
         'adding a shortcut did not create the missing desktop directory'
+    Assert-True (Test-Path -LiteralPath $startMenuDirectory -PathType Container) `
+        'adding a shortcut did not create the missing Start Menu directory'
     $realDiscordShortcut = Join-Path $desktopDirectory 'Discord.lnk'
     [System.IO.File]::WriteAllText($realDiscordShortcut, 'unrelated Discord shortcut', [System.Text.Encoding]::UTF8)
+    $originalStartMenuLink = Join-Path $startMenuDirectory 'Discord.lnk'
+    [System.IO.File]::WriteAllText($originalStartMenuLink, 'original Start Menu shortcut', [System.Text.Encoding]::UTF8)
 
     $addShortcut = Invoke-TestCommand @('add', 'shortcut', 'powershell.exe')
     Assert-True ($addShortcut.ExitCode -eq 0) "desktop shortcut creation failed: $($addShortcut.Output)"
     $managedDesktopShortcut = Join-Path $desktopDirectory 'Conduit - Powershell.lnk'
+    $managedStartMenuShortcut = Join-Path $startMenuDirectory 'Conduit - Powershell.lnk'
     Assert-True (Test-Path -LiteralPath $managedDesktopShortcut -PathType Leaf) `
         'managed desktop shortcut was not created'
+    Assert-True (Test-Path -LiteralPath $managedStartMenuShortcut -PathType Leaf) `
+        'managed Start Menu shortcut was not created'
     Assert-True ((Get-Content -LiteralPath $realDiscordShortcut -Raw -Encoding UTF8) -eq 'unrelated Discord shortcut') `
         'unrelated Discord shortcut was modified'
 
     $shortcutShell = New-Object -ComObject WScript.Shell
     $desktopLink = $null
     try {
-        $desktopLink = $shortcutShell.CreateShortcut($managedDesktopShortcut)
-        Assert-True ([System.IO.Path]::GetFileName($desktopLink.TargetPath) -ieq 'conduit.cmd') `
-            'desktop shortcut does not target Conduit'
-        Assert-True ($desktopLink.Arguments -eq 'powershell.exe') `
-            'desktop shortcut does not launch the requested application'
-        Assert-True ($desktopLink.IconLocation -ieq ((Get-Command powershell.exe).Source + ',0')) `
-            'desktop shortcut does not use the application executable icon'
+        foreach ($linkPath in @($managedDesktopShortcut, $managedStartMenuShortcut)) {
+            $desktopLink = $shortcutShell.CreateShortcut($linkPath)
+            Assert-True ([System.IO.Path]::GetFileName($desktopLink.TargetPath) -ieq 'conduit.cmd') `
+                'shortcut does not target Conduit'
+            Assert-True ($desktopLink.Arguments -eq 'powershell.exe') `
+                'shortcut does not launch the requested application'
+            Assert-True ($desktopLink.IconLocation -ieq ((Get-Command powershell.exe).Source + ',0')) `
+                'shortcut does not use the application executable icon'
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($desktopLink)
+            $desktopLink = $null
+        }
     }
     finally {
         if ($null -ne $desktopLink -and [Runtime.InteropServices.Marshal]::IsComObject($desktopLink)) {
@@ -148,6 +167,8 @@ public static class ConduitFolderTestEnvironment {
     Assert-True ($replaceShortcut.ExitCode -eq 0) 'existing desktop shortcut replacement failed'
     Assert-True ($replaceShortcut.Output -match '^Replaced Conduit shortcut') `
         'existing desktop shortcut was not reported as replaced'
+    Assert-True (@(Get-ChildItem -LiteralPath $startMenuDirectory -Filter 'Conduit - *.lnk').Count -eq 1) `
+        're-adding duplicated the Start Menu entry'
 
     $addStartup = Invoke-TestCommand @('add', 'startup', 'powershell.exe')
     Assert-True ($addStartup.ExitCode -eq 0) "startup shortcut creation failed: $($addStartup.Output)"
@@ -159,6 +180,8 @@ public static class ConduitFolderTestEnvironment {
     Assert-True ($removeStartup.ExitCode -eq 0) 'startup shortcut removal failed'
     Assert-True (-not (Test-Path -LiteralPath $managedStartupShortcut)) `
         'managed startup shortcut was not removed'
+    Assert-True ((Test-Path -LiteralPath $managedStartMenuShortcut) -and (Test-Path -LiteralPath $managedDesktopShortcut)) `
+        'removing startup removed the desktop or Start Menu shortcut'
     $removeMissingStartup = Invoke-TestCommand @('remove', 'startup', 'powershell.exe')
     Assert-True ($removeMissingStartup.ExitCode -eq 0) 'removing an absent startup shortcut should be harmless'
 
@@ -166,8 +189,26 @@ public static class ConduitFolderTestEnvironment {
     Assert-True ($removeShortcut.ExitCode -eq 0) 'desktop shortcut removal failed'
     Assert-True (-not (Test-Path -LiteralPath $managedDesktopShortcut)) `
         'managed desktop shortcut was not removed'
+    Assert-True (-not (Test-Path -LiteralPath $managedStartMenuShortcut)) `
+        'managed Start Menu shortcut was not removed'
     Assert-True (Test-Path -LiteralPath $realDiscordShortcut -PathType Leaf) `
         'removing a Conduit shortcut removed the unrelated Discord shortcut'
+    Assert-True ((Get-Content -LiteralPath $originalStartMenuLink -Raw -Encoding UTF8) -eq 'original Start Menu shortcut') `
+        'original Start Menu shortcut was changed'
+
+    $startupOnly = Invoke-TestCommand @('add', 'startup', 'powershell.exe')
+    Assert-True ($startupOnly.ExitCode -eq 0) 'startup-only setup failed'
+    Assert-True (-not (Test-Path -LiteralPath $managedDesktopShortcut) -and -not (Test-Path -LiteralPath $managedStartMenuShortcut)) `
+        'adding startup unexpectedly created desktop or Start Menu shortcuts'
+    $readded = Invoke-TestCommand @('add', 'shortcut', 'powershell.exe')
+    Assert-True ($readded.ExitCode -eq 0) 'shortcut recreation failed'
+    Remove-Item -LiteralPath $managedDesktopShortcut -Force
+    $removePartial = Invoke-TestCommand @('remove', 'shortcut', 'powershell.exe')
+    Assert-True ($removePartial.ExitCode -eq 0) 'removal failed when desktop link was already missing'
+    Assert-True (-not (Test-Path -LiteralPath $managedStartMenuShortcut)) `
+        'missing desktop link prevented Start Menu removal'
+    Assert-True (Test-Path -LiteralPath $managedStartupShortcut) `
+        'removing shortcuts also removed the independent startup link'
 
     $unsafeShortcut = Invoke-TestCommand @('add', 'shortcut', 'discord&calc')
     Assert-True ($unsafeShortcut.ExitCode -eq 1) 'unsafe shortcut application name should fail'
@@ -189,7 +230,7 @@ public static class ConduitFolderTestEnvironment {
     Assert-True ($disabledNotice.Output -notmatch 'is available') 'disabled update check still produced a notice'
 
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
-    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.6', [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.7', [System.Text.Encoding]::UTF8)
     $currentNotice = Invoke-TestCommand @('missing.exe')
     Assert-True ($currentNotice.Output -notmatch 'is available') 'current version produced an update notice'
 
@@ -249,6 +290,7 @@ finally {
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_VERSION_URL -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_DESKTOP_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_START_MENU_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_STARTUP_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $stateDirectory -PathType Container) {
         Remove-Item -LiteralPath $stateDirectory -Recurse -Force

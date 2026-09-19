@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.6'
+$script:Version = '3.2.7'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -211,6 +211,9 @@ profile layout:
   %USERPROFILE%\vpns\<provider>\*.conf
 
 Set CONDUIT_DIR to override the profile directory.
+
+add/remove shortcut manages both Desktop and Start Menu links.
+add/remove startup manages only the sign-in Startup entry.
 
 Windows uses WireSock Secure Connect as its per-application WireGuard
 backend. One Conduit VPN session may be active at a time on Windows.
@@ -1135,15 +1138,19 @@ function Get-ConduitShortcutIdentity {
 
 
 function Get-ConduitShortcutDirectory {
-    param([Parameter(Mandatory = $true)][ValidateSet('shortcut', 'startup')][string] $Kind)
+    param([Parameter(Mandatory = $true)][ValidateSet('shortcut', 'start-menu', 'startup')][string] $Kind)
 
-    $environmentName = if ($Kind -eq 'shortcut') { 'CONDUIT_DESKTOP_DIR' } else { 'CONDUIT_STARTUP_DIR' }
+    $locations = @{
+        'shortcut'   = @('CONDUIT_DESKTOP_DIR', 'DesktopDirectory', 'Desktop')
+        'start-menu' = @('CONDUIT_START_MENU_DIR', 'Programs', 'Programs')
+        'startup'    = @('CONDUIT_STARTUP_DIR', 'Startup', 'Startup')
+    }
+    $environmentName, $specialFolder, $registryName = $locations[$Kind]
     $override = [Environment]::GetEnvironmentVariable($environmentName)
     if (-not [string]::IsNullOrWhiteSpace($override)) {
         return [System.IO.Path]::GetFullPath($override)
     }
 
-    $specialFolder = if ($Kind -eq 'shortcut') { 'DesktopDirectory' } else { 'Startup' }
     # The default overload returns an empty string when a configured folder
     # does not exist yet. Preserve redirected/OneDrive paths and let add create
     # the directory; remove must remain read-only when the link is absent.
@@ -1151,7 +1158,6 @@ function Get-ConduitShortcutDirectory {
         $specialFolder, [Environment+SpecialFolderOption]::DoNotVerify
     )
     if ([string]::IsNullOrWhiteSpace($directory)) {
-        $registryName = if ($Kind -eq 'shortcut') { 'Desktop' } else { 'Startup' }
         $registryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
         $configured = Get-ItemProperty -LiteralPath $registryPath -Name $registryName -ErrorAction SilentlyContinue
         if ($null -ne $configured) {
@@ -1162,6 +1168,19 @@ function Get-ConduitShortcutDirectory {
         Throw-ConduitError "Windows could not locate the $Kind folder; set $environmentName to the intended folder and retry"
     }
     return $directory
+}
+
+
+function Get-ConduitShortcutDirectories {
+    param([Parameter(Mandatory = $true)][ValidateSet('shortcut', 'startup')][string] $Kind)
+
+    if ($Kind -eq 'shortcut') {
+        Get-ConduitShortcutDirectory -Kind shortcut
+        Get-ConduitShortcutDirectory -Kind start-menu
+    }
+    else {
+        Get-ConduitShortcutDirectory -Kind startup
+    }
 }
 
 
@@ -1189,44 +1208,46 @@ function Add-ConduitShortcut {
     $identity = Get-ConduitShortcutIdentity -Application $Application
     $launcher = Get-ConduitLauncherPath
     $resolvedApplication = Resolve-ConduitApplication -Command $Application
-    $directory = Get-ConduitShortcutDirectory -Kind $Kind
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $directories = @(Get-ConduitShortcutDirectories -Kind $Kind | Select-Object -Unique)
+    foreach ($directory in $directories) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
 
-    $path = Join-Path $directory $identity.FileName
-    $temporaryPath = Join-Path $directory ('.conduit-{0}.lnk' -f [Guid]::NewGuid().ToString('N'))
-    $wasExisting = Test-Path -LiteralPath $path -PathType Leaf
-    $shell = $null
-    $shortcut = $null
-    try {
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($temporaryPath)
-        $shortcut.TargetPath = $launcher
-        $shortcut.Arguments = Join-NativeArguments @($identity.Application)
-        $shortcut.WorkingDirectory = Split-Path -Parent $launcher
-        $shortcut.IconLocation = Get-ConduitShortcutIconLocation -Application $resolvedApplication
-        $shortcut.Description = "Launch $($identity.Label) through Conduit VPN"
-        $shortcut.WindowStyle = 7
-        $shortcut.Save()
-        if (-not (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
-            Throw-ConduitError "Windows did not create the shortcut: $temporaryPath"
+        $path = Join-Path $directory $identity.FileName
+        $temporaryPath = Join-Path $directory ('.conduit-{0}.lnk' -f [Guid]::NewGuid().ToString('N'))
+        $wasExisting = Test-Path -LiteralPath $path -PathType Leaf
+        $shell = $null
+        $shortcut = $null
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut($temporaryPath)
+            $shortcut.TargetPath = $launcher
+            $shortcut.Arguments = Join-NativeArguments @($identity.Application)
+            $shortcut.WorkingDirectory = Split-Path -Parent $launcher
+            $shortcut.IconLocation = Get-ConduitShortcutIconLocation -Application $resolvedApplication
+            $shortcut.Description = "Launch $($identity.Label) through Conduit VPN"
+            $shortcut.WindowStyle = 7
+            $shortcut.Save()
+            if (-not (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+                Throw-ConduitError "Windows did not create the shortcut: $temporaryPath"
+            }
+            Copy-Item -LiteralPath $temporaryPath -Destination $path -Force
         }
-        Copy-Item -LiteralPath $temporaryPath -Destination $path -Force
-    }
-    catch {
-        Throw-ConduitError "could not create the Conduit $Kind for $($identity.Label): $($_.Exception.Message)"
-    }
-    finally {
-        if ($null -ne $shortcut -and [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) {
-            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)
+        catch {
+            Throw-ConduitError "could not create the Conduit $Kind for $($identity.Label) in ${directory}: $($_.Exception.Message)"
         }
-        if ($null -ne $shell -and [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
-            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+        finally {
+            if ($null -ne $shortcut -and [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)
+            }
+            if ($null -ne $shell -and [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+            }
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-    }
 
-    $verb = if ($wasExisting) { 'Replaced' } else { 'Created' }
-    Write-Output "$verb Conduit $kind for $($identity.Label): $path"
+        $verb = if ($wasExisting) { 'Replaced' } else { 'Created' }
+        Write-Output "$verb Conduit $kind for $($identity.Label): $path"
+    }
 }
 
 
@@ -1237,15 +1258,17 @@ function Remove-ConduitShortcut {
     )
 
     $identity = Get-ConduitShortcutIdentity -Application $Application
-    $directory = Get-ConduitShortcutDirectory -Kind $Kind
-    $path = Join-Path $directory $identity.FileName
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        Write-Output "No Conduit $kind exists for $($identity.Label): $path"
-        return
-    }
+    $directories = @(Get-ConduitShortcutDirectories -Kind $Kind | Select-Object -Unique)
+    foreach ($directory in $directories) {
+        $path = Join-Path $directory $identity.FileName
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Write-Output "No Conduit $kind exists for $($identity.Label): $path"
+            continue
+        }
 
-    Remove-Item -LiteralPath $path -Force
-    Write-Output "Removed Conduit $kind for $($identity.Label): $path"
+        Remove-Item -LiteralPath $path -Force
+        Write-Output "Removed Conduit $kind for $($identity.Label): $path"
+    }
 }
 
 

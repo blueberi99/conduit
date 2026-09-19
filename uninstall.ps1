@@ -31,7 +31,7 @@ function Remove-ConduitManagedShortcuts {
     $shell = $null
     try {
         $shell = New-Object -ComObject WScript.Shell
-        foreach ($folderName in @('DesktopDirectory', 'Startup')) {
+        foreach ($folderName in @('DesktopDirectory', 'Programs', 'Startup')) {
             $folder = [Environment]::GetFolderPath($folderName)
             if ([string]::IsNullOrWhiteSpace($folder) -or
                 -not (Test-Path -LiteralPath $folder -PathType Container)) {

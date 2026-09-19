@@ -145,10 +145,10 @@ Offline, blocked, malformed, or timed-out responses are ignored so this check
 cannot prevent the VPN session. Set `CONDUIT_NO_UPDATE_CHECK=1` to disable the
 check for the current environment.
 
-### Desktop and startup shortcuts
+### Desktop, Start Menu, and startup shortcuts
 
-Create or refresh a desktop shortcut that always launches an application
-through Conduit:
+Create or refresh both desktop and Start Menu shortcuts that launch an
+application through Conduit, using its own icon:
 
 ```powershell
 conduit add shortcut discord
@@ -161,7 +161,7 @@ conduit add startup discord
 conduit remove startup discord
 ```
 
-Desktop shortcuts can likewise be removed with:
+Remove both desktop and Start Menu shortcuts with:
 
 ```powershell
 conduit remove shortcut discord
@@ -171,6 +171,11 @@ Managed links are named `Conduit - <App>.lnk`. Adding an existing entry replaces
 only that exact Conduit link. Removing one never deletes Discord's or another
 application's original shortcut. Startup entries are created for the current
 Windows user and launch the same `conduit <application>` command at sign-in.
+
+After updating an older Conduit installation, run `add shortcut` again to add
+the Start Menu entry for an existing desktop shortcut. Search for
+`Conduit - Discord` in Start. Creating or removing these shortcuts does not
+change the separately managed Startup entry.
 
 Shortcuts use the application's own icon. Discord and other Squirrel apps use
 the stable installation's `app.ico` when present, keeping the icon after app
@@ -265,9 +270,9 @@ From an Administrator PowerShell in the repository:
 ```
 
 The uninstaller removes Conduit, its generated session state, and managed
-desktop/startup shortcuts that still target Conduit's installed launcher. It
-preserves the VPN profiles under `%USERPROFILE%\vpns`, unrelated application
-shortcuts, and WireSock.
+desktop, Start Menu, and startup shortcuts that still target Conduit's installed
+launcher. It preserves the VPN profiles under `%USERPROFILE%\vpns`, unrelated
+application shortcuts, and WireSock.
 
 ## WireSock trust boundary
 

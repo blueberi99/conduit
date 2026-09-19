@@ -1,5 +1,13 @@
 # changelog
 
+# Conduit v3.2.7
+
+- Make `conduit add shortcut <application>` create or refresh both Desktop and
+  Start Menu links with the application's icon
+- Remove both links with `conduit remove shortcut <application>`, even if one
+  has already been deleted; keep Startup entries independent
+- Include managed Start Menu links in uninstall cleanup
+
 # Conduit v3.2.6
 
 - Resolve the configured Desktop/Startup path even if its directory does not
