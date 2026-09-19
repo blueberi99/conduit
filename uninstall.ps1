@@ -28,6 +28,9 @@ if ([string]::IsNullOrWhiteSpace($profileDirectory)) {
 
 function Remove-ConduitManagedShortcuts {
     $launcher = Join-Path $installDirectory 'conduit.cmd'
+    $hostExecutable = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    $argumentsPattern = '^-NoLogo -NoProfile -ExecutionPolicy Bypass -File "?' +
+        [regex]::Escape($installedScript) + '"? [A-Za-z0-9._-]+$'
     $shell = $null
     try {
         $shell = New-Object -ComObject WScript.Shell
@@ -42,7 +45,8 @@ function Remove-ConduitManagedShortcuts {
                 $shortcut = $null
                 try {
                     $shortcut = $shell.CreateShortcut($file.FullName)
-                    if ($shortcut.TargetPath -ieq $launcher) {
+                    if ($shortcut.TargetPath -ieq $launcher -or
+                        ($shortcut.TargetPath -ieq $hostExecutable -and $shortcut.Arguments -match $argumentsPattern)) {
                         Remove-Item -LiteralPath $file.FullName -Force
                     }
                 }

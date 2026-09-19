@@ -1,5 +1,12 @@
 # changelog
 
+# Conduit v3.2.8
+
+- Target Windows PowerShell directly in managed shortcuts so Windows includes
+  them in Start's application list, while still running Conduit with its normal
+  command-line behavior and the application's own icon
+- Remove both legacy CMD links and native-host links safely during uninstall
+
 # Conduit v3.2.7
 
 - Make `conduit add shortcut <application>` create or refresh both Desktop and

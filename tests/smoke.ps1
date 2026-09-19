@@ -50,8 +50,8 @@ try {
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.7$') 'unexpected version output'
-    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.7') `
+    Assert-True ($version.Output -match '^conduit 3\.2\.8$') 'unexpected version output'
+    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.8') `
         'VERSION does not match conduit.ps1'
 
     $noArguments = Invoke-TestCommand @()
@@ -144,10 +144,11 @@ public static class ConduitFolderTestEnvironment {
     try {
         foreach ($linkPath in @($managedDesktopShortcut, $managedStartMenuShortcut)) {
             $desktopLink = $shortcutShell.CreateShortcut($linkPath)
-            Assert-True ([System.IO.Path]::GetFileName($desktopLink.TargetPath) -ieq 'conduit.cmd') `
-                'shortcut does not target Conduit'
-            Assert-True ($desktopLink.Arguments -eq 'powershell.exe') `
-                'shortcut does not launch the requested application'
+            Assert-True ([System.IO.Path]::GetFileName($desktopLink.TargetPath) -ieq 'powershell.exe') `
+                'shortcut does not target a native executable recognized by Start'
+            Assert-True ($desktopLink.Arguments -match '^-NoLogo -NoProfile -ExecutionPolicy Bypass -File ' -and
+                $desktopLink.Arguments.Contains($scriptPath) -and $desktopLink.Arguments.EndsWith(' powershell.exe')) `
+                'shortcut does not launch Conduit with the requested application'
             Assert-True ($desktopLink.IconLocation -ieq ((Get-Command powershell.exe).Source + ',0')) `
                 'shortcut does not use the application executable icon'
             [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($desktopLink)
@@ -210,6 +211,63 @@ public static class ConduitFolderTestEnvironment {
     Assert-True (Test-Path -LiteralPath $managedStartupShortcut) `
         'removing shortcuts also removed the independent startup link'
 
+    # Test only the uninstaller's link-cleanup function in temporary folders.
+    # The full uninstaller must never run against the developer's installation.
+    $uninstallTokens = $null
+    $uninstallErrors = $null
+    $uninstallAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $repository 'uninstall.ps1'), [ref]$uninstallTokens, [ref]$uninstallErrors
+    )
+    $cleanupFunction = $uninstallAst.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Remove-ConduitManagedShortcuts'
+    }, $true)
+    Add-Type -TypeDefinition @'
+using System;
+public static class ConduitCleanupTestEnvironment {
+    public static string Desktop, Programs, Startup;
+    public static string GetFolderPath(string name) {
+        if (name == "DesktopDirectory") return Desktop;
+        if (name == "Programs") return Programs;
+        if (name == "Startup") return Startup;
+        return Environment.GetFolderPath(Environment.SpecialFolder.System);
+    }
+}
+'@
+    [ConduitCleanupTestEnvironment]::Desktop = $desktopDirectory
+    [ConduitCleanupTestEnvironment]::Programs = $startMenuDirectory
+    [ConduitCleanupTestEnvironment]::Startup = $startupDirectory
+    $cleanupAdd = Invoke-TestCommand @('add', 'shortcut', 'powershell.exe')
+    Assert-True ($cleanupAdd.ExitCode -eq 0) 'uninstaller test setup failed'
+    $cleanupShell = New-Object -ComObject WScript.Shell
+    $unrelatedLinkPath = Join-Path $startMenuDirectory 'Conduit - Unrelated.lnk'
+    $legacyLinkPath = Join-Path $startMenuDirectory 'Conduit - Legacy.lnk'
+    try {
+        $otherLink = $cleanupShell.CreateShortcut($unrelatedLinkPath)
+        $otherLink.TargetPath = (Get-Command powershell.exe).Source
+        $otherLink.Arguments = '-NoProfile -File "C:\some-other-app.ps1"'
+        $otherLink.Save()
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($otherLink)
+        $legacyLink = $cleanupShell.CreateShortcut($legacyLinkPath)
+        $legacyLink.TargetPath = Join-Path $repository 'conduit.cmd'
+        $legacyLink.Arguments = 'powershell.exe'
+        $legacyLink.Save()
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($legacyLink)
+    }
+    finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($cleanupShell) }
+    & {
+        $installDirectory = $repository
+        $installedScript = $scriptPath
+        . ([ScriptBlock]::Create($cleanupFunction.Extent.Text.Replace('[Environment]', '[ConduitCleanupTestEnvironment]')))
+        Remove-ConduitManagedShortcuts
+    }
+    foreach ($managedPath in @($managedDesktopShortcut, $managedStartMenuShortcut, $managedStartupShortcut, $legacyLinkPath)) {
+        Assert-True (-not (Test-Path -LiteralPath $managedPath)) "uninstaller left a managed link: $managedPath"
+    }
+    Assert-True (Test-Path -LiteralPath $unrelatedLinkPath) 'uninstaller removed a shortcut for another script'
+    Assert-True ((Get-Content -LiteralPath $originalStartMenuLink -Raw -Encoding UTF8) -eq 'original Start Menu shortcut') `
+        'uninstaller changed the original application shortcut'
+
     $unsafeShortcut = Invoke-TestCommand @('add', 'shortcut', 'discord&calc')
     Assert-True ($unsafeShortcut.ExitCode -eq 1) 'unsafe shortcut application name should fail'
     Assert-True ($unsafeShortcut.Output -match 'must be a command name') `
@@ -230,7 +288,7 @@ public static class ConduitFolderTestEnvironment {
     Assert-True ($disabledNotice.Output -notmatch 'is available') 'disabled update check still produced a notice'
 
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
-    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.7', [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.8', [System.Text.Encoding]::UTF8)
     $currentNotice = Invoke-TestCommand @('missing.exe')
     Assert-True ($currentNotice.Output -notmatch 'is available') 'current version produced an update notice'
 

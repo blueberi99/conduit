@@ -114,7 +114,8 @@ try {
             try {
                 Assert-True ($link.IconLocation -ceq ($stableIconPath + ',0')) `
                     'shortcut icon still depends on the removed application version'
-                Assert-True ($link.Arguments -eq 'discordcanary') 'shortcut lost the dynamic application command'
+                Assert-True ($link.Arguments.Contains($scriptPath) -and $link.Arguments.EndsWith(' discordcanary')) `
+                    'shortcut lost the Conduit script or dynamic application command'
                 $savedIcon = New-Object System.Drawing.Icon($stableIconPath)
                 $savedIcon.Dispose()
             }

@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.7'
+$script:Version = '3.2.8'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -1208,6 +1208,13 @@ function Add-ConduitShortcut {
     $identity = Get-ConduitShortcutIdentity -Application $Application
     $launcher = Get-ConduitLauncherPath
     $resolvedApplication = Resolve-ConduitApplication -Command $Application
+    # Start filters shortcuts whose targets are scripts rather than executables.
+    # Use the same Windows PowerShell invocation as conduit.cmd, with a native
+    # target so desktop, Start Menu, and Startup links share one launch contract.
+    $hostExecutable = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    $launchArguments = Join-NativeArguments @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:SelfPath, $identity.Application
+    )
     $directories = @(Get-ConduitShortcutDirectories -Kind $Kind | Select-Object -Unique)
     foreach ($directory in $directories) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -1220,8 +1227,8 @@ function Add-ConduitShortcut {
         try {
             $shell = New-Object -ComObject WScript.Shell
             $shortcut = $shell.CreateShortcut($temporaryPath)
-            $shortcut.TargetPath = $launcher
-            $shortcut.Arguments = Join-NativeArguments @($identity.Application)
+            $shortcut.TargetPath = $hostExecutable
+            $shortcut.Arguments = $launchArguments
             $shortcut.WorkingDirectory = Split-Path -Parent $launcher
             $shortcut.IconLocation = Get-ConduitShortcutIconLocation -Application $resolvedApplication
             $shortcut.Description = "Launch $($identity.Label) through Conduit VPN"
