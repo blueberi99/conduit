@@ -17,6 +17,8 @@ $appDirectory = Join-Path $squirrelRoot 'app-2.0.1'
 $appPath = Join-Path $appDirectory 'TestCanary.exe'
 $discordCanaryPath = Join-Path $appDirectory 'DiscordCanary.exe'
 $shortcutDirectory = Join-Path $testRoot 'Desktop'
+$startupDirectory = Join-Path $testRoot 'Startup'
+$stableIconPath = Join-Path $squirrelRoot 'app.ico'
 $backendPath = Join-Path $testRoot 'fake-wiresock.exe'
 $capturePath = Join-Path $testRoot 'captured.conf'
 
@@ -72,6 +74,11 @@ try {
     Add-Type -TypeDefinition $applicationSource -Language CSharp -OutputAssembly $appPath -OutputType ConsoleApplication
     Copy-Item -LiteralPath $appPath -Destination $discordCanaryPath
     Copy-Item -LiteralPath $appPath -Destination (Join-Path $squirrelRoot 'Update.exe')
+    Add-Type -AssemblyName System.Drawing
+    $icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Get-Command powershell.exe).Source)
+    $iconStream = [System.IO.File]::Create($stableIconPath)
+    try { $icon.Save($iconStream) }
+    finally { $iconStream.Dispose(); $icon.Dispose() }
 
     $env:CONDUIT_DIR = $profileRoot
     $env:CONDUIT_STATE_DIR = $stateRoot
@@ -80,6 +87,7 @@ try {
     $env:CONDUIT_NO_TASKKILL = '1'
     $env:CONDUIT_NO_UPDATE_CHECK = '1'
     $env:CONDUIT_DESKTOP_DIR = $shortcutDirectory
+    $env:CONDUIT_STARTUP_DIR = $startupDirectory
     $env:FAKE_WIRESOCK_CAPTURE = $capturePath
     $env:LOCALAPPDATA = $testRoot
 
@@ -90,6 +98,28 @@ try {
     Assert-True ($shortcutExitCode -eq 0) "Discord Canary discovery failed: $($shortcutOutput -join ' ')"
     Assert-True (Test-Path -LiteralPath (Join-Path $shortcutDirectory 'Conduit - Discord Canary.lnk') -PathType Leaf) `
         'Discord Canary discovery did not create the managed shortcut'
+
+    $startupOutput = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        add startup discordcanary 2>&1)
+    Assert-True ($LASTEXITCODE -eq 0) "Startup icon setup failed: $($startupOutput -join ' ')"
+    # An app update removes the old Discord executable; both shortcut icons
+    # must still point at a valid file outside that versioned directory.
+    Remove-Item -LiteralPath $discordCanaryPath -Force
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        foreach ($folder in @($shortcutDirectory, $startupDirectory)) {
+            $link = $shell.CreateShortcut((Join-Path $folder 'Conduit - Discord Canary.lnk'))
+            try {
+                Assert-True ($link.IconLocation -ceq ($stableIconPath + ',0')) `
+                    'shortcut icon still depends on the removed application version'
+                Assert-True ($link.Arguments -eq 'discordcanary') 'shortcut lost the dynamic application command'
+                $savedIcon = New-Object System.Drawing.Icon($stableIconPath)
+                $savedIcon.Dispose()
+            }
+            finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
+        }
+    }
+    finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
 
     Write-Output 'integration: foreground session'
     $ErrorActionPreference = 'Continue'
@@ -149,6 +179,7 @@ try {
 finally {
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK -ErrorAction SilentlyContinue
     Remove-Item Env:CONDUIT_DESKTOP_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:CONDUIT_STARTUP_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testContainer -PathType Container) {
         Remove-Item -LiteralPath $testContainer -Recurse -Force
     }

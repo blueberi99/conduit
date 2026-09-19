@@ -1,5 +1,13 @@
 # changelog
 
+# Conduit v3.2.6
+
+- Resolve the configured Desktop/Startup path even if its directory does not
+  exist yet, preserving redirected folders and creating them when adding a link
+- Use Discord's stable `app.ico` for managed shortcuts so application updates
+  do not leave the shortcut pointing at a removed executable icon
+- Keep executable icons for applications without a stable Squirrel icon
+
 # Conduit v3.2.5
 
 - Add `conduit add shortcut <application>` for managed desktop shortcuts

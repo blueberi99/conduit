@@ -172,6 +172,12 @@ only that exact Conduit link. Removing one never deletes Discord's or another
 application's original shortcut. Startup entries are created for the current
 Windows user and launch the same `conduit <application>` command at sign-in.
 
+Shortcuts use the application's own icon. Discord and other Squirrel apps use
+the stable installation's `app.ico` when present, keeping the icon after app
+updates remove an older executable. Other applications use their executable's
+embedded icon. Missing Desktop or Startup directories are created at the
+Windows-configured location, including redirected folders.
+
 ### Discord updates
 
 Discord installs its executable below a versioned path such as:

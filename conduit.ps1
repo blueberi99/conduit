@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.5'
+$script:Version = '3.2.6'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -1144,11 +1144,39 @@ function Get-ConduitShortcutDirectory {
     }
 
     $specialFolder = if ($Kind -eq 'shortcut') { 'DesktopDirectory' } else { 'Startup' }
-    $directory = [Environment]::GetFolderPath($specialFolder)
+    # The default overload returns an empty string when a configured folder
+    # does not exist yet. Preserve redirected/OneDrive paths and let add create
+    # the directory; remove must remain read-only when the link is absent.
+    $directory = [Environment]::GetFolderPath(
+        $specialFolder, [Environment+SpecialFolderOption]::DoNotVerify
+    )
     if ([string]::IsNullOrWhiteSpace($directory)) {
-        Throw-ConduitError "Windows could not locate the $Kind folder"
+        $registryName = if ($Kind -eq 'shortcut') { 'Desktop' } else { 'Startup' }
+        $registryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+        $configured = Get-ItemProperty -LiteralPath $registryPath -Name $registryName -ErrorAction SilentlyContinue
+        if ($null -ne $configured) {
+            $directory = [Environment]::ExpandEnvironmentVariables([string]$configured.$registryName)
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        Throw-ConduitError "Windows could not locate the $Kind folder; set $environmentName to the intended folder and retry"
     }
     return $directory
+}
+
+
+function Get-ConduitShortcutIconLocation {
+    param([Parameter(Mandatory = $true)] $Application)
+
+    # Squirrel keeps app.ico in its stable application root. Referencing the
+    # versioned executable instead breaks the icon after old versions are removed.
+    if (Test-Path -LiteralPath $Application.AllowedApp -PathType Container) {
+        $icon = Join-Path $Application.AllowedApp 'app.ico'
+        if (Test-Path -LiteralPath $icon -PathType Leaf) {
+            return "$icon,0"
+        }
+    }
+    return "$($Application.Path),0"
 }
 
 
@@ -1175,7 +1203,7 @@ function Add-ConduitShortcut {
         $shortcut.TargetPath = $launcher
         $shortcut.Arguments = Join-NativeArguments @($identity.Application)
         $shortcut.WorkingDirectory = Split-Path -Parent $launcher
-        $shortcut.IconLocation = "$($resolvedApplication.Path),0"
+        $shortcut.IconLocation = Get-ConduitShortcutIconLocation -Application $resolvedApplication
         $shortcut.Description = "Launch $($identity.Label) through Conduit VPN"
         $shortcut.WindowStyle = 7
         $shortcut.Save()

@@ -48,8 +48,8 @@ try {
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.5$') 'unexpected version output'
-    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.5') `
+    Assert-True ($version.Output -match '^conduit 3\.2\.6$') 'unexpected version output'
+    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.6') `
         'VERSION does not match conduit.ps1'
 
     $noArguments = Invoke-TestCommand @()
@@ -64,7 +64,55 @@ try {
     Assert-True ($help.Output -match 'conduit add shortcut <application>') `
         'help does not list managed shortcuts'
 
-    New-Item -ItemType Directory -Path $desktopDirectory, $startupDirectory -Force | Out-Null
+    # Simulate the Windows folder API returning an empty result for a missing
+    # redirected directory. Substitute only this external API in the actual
+    # function; never change the current user's Known Folder registry values.
+    Add-Type -TypeDefinition @'
+using System;
+public static class ConduitFolderTestEnvironment {
+    public static string Folder;
+    public static string GetEnvironmentVariable(string name) { return null; }
+    public static string GetFolderPath(string name) { return ""; }
+    public static string GetFolderPath(string name, Environment.SpecialFolderOption option) {
+        return option == Environment.SpecialFolderOption.DoNotVerify ? Folder : "";
+    }
+    public static string ExpandEnvironmentVariables(string value) {
+        return Environment.ExpandEnvironmentVariables(value);
+    }
+}
+'@
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
+    $folderFunction = $ast.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-ConduitShortcutDirectory'
+    }, $true)
+    $desktopDirectory = Join-Path $stateDirectory ('Redirected ' + [char]0x130 + 'sim\Desktop')
+    & {
+        . ([ScriptBlock]::Create($folderFunction.Extent.Text.Replace('[Environment]', '[ConduitFolderTestEnvironment]')))
+        [ConduitFolderTestEnvironment]::Folder = $desktopDirectory
+        Assert-True ((Get-ConduitShortcutDirectory -Kind shortcut) -ceq $desktopDirectory) `
+            'missing redirected desktop path was lost'
+        Assert-True (-not (Test-Path -LiteralPath $desktopDirectory)) `
+            'looking up a missing directory unexpectedly created it'
+        [ConduitFolderTestEnvironment]::Folder = $startupDirectory
+        Assert-True ((Get-ConduitShortcutDirectory -Kind startup) -ceq $startupDirectory) `
+            'missing startup path was lost'
+        # Exercise the fallback when the Windows folder API cannot return a path.
+        function Get-ItemProperty { param($LiteralPath, $Name, $ErrorAction)
+            return [pscustomobject]@{ Desktop = $desktopDirectory; Startup = $startupDirectory }
+        }
+        [ConduitFolderTestEnvironment]::Folder = ''
+        Assert-True ((Get-ConduitShortcutDirectory -Kind shortcut) -ceq $desktopDirectory) `
+            'configured registry desktop fallback was lost'
+    }
+    $desktopDirectory = Join-Path $stateDirectory 'Redirected Desktop\Desktop'
+    $env:CONDUIT_DESKTOP_DIR = $desktopDirectory
+    $addMissingDesktop = Invoke-TestCommand @('add', 'shortcut', 'powershell.exe')
+    Assert-True ($addMissingDesktop.ExitCode -eq 0) "missing desktop creation failed: $($addMissingDesktop.Output)"
+    Assert-True (Test-Path -LiteralPath $desktopDirectory -PathType Container) `
+        'adding a shortcut did not create the missing desktop directory'
     $realDiscordShortcut = Join-Path $desktopDirectory 'Discord.lnk'
     [System.IO.File]::WriteAllText($realDiscordShortcut, 'unrelated Discord shortcut', [System.Text.Encoding]::UTF8)
 
@@ -84,6 +132,8 @@ try {
             'desktop shortcut does not target Conduit'
         Assert-True ($desktopLink.Arguments -eq 'powershell.exe') `
             'desktop shortcut does not launch the requested application'
+        Assert-True ($desktopLink.IconLocation -ieq ((Get-Command powershell.exe).Source + ',0')) `
+            'desktop shortcut does not use the application executable icon'
     }
     finally {
         if ($null -ne $desktopLink -and [Runtime.InteropServices.Marshal]::IsComObject($desktopLink)) {
@@ -139,7 +189,7 @@ try {
     Assert-True ($disabledNotice.Output -notmatch 'is available') 'disabled update check still produced a notice'
 
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
-    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.5', [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.6', [System.Text.Encoding]::UTF8)
     $currentNotice = Invoke-TestCommand @('missing.exe')
     Assert-True ($currentNotice.Output -notmatch 'is available') 'current version produced an update notice'
 
