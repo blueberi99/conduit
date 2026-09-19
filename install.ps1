@@ -24,9 +24,73 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
 $sourceDirectory = Split-Path -Parent $PSCommandPath
 $installDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Conduit'
 $stateDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Conduit'
+$stateOverride = [Environment]::GetEnvironmentVariable('CONDUIT_STATE_DIR')
+if (-not [string]::IsNullOrWhiteSpace($stateOverride)) {
+    $stateDirectory = [System.IO.Path]::GetFullPath($stateOverride)
+}
 $profileDirectory = [Environment]::GetEnvironmentVariable('CONDUIT_DIR')
 if ([string]::IsNullOrWhiteSpace($profileDirectory)) {
     $profileDirectory = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'vpns'
+}
+
+function Get-ConduitScriptVersion {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    # Inspect the installed version without executing the old program.
+    $source = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+    $match = [regex]::Match($source, '(?m)^\$script:Version\s*=\s*''(?<version>\d+\.\d+\.\d+)''\s*$')
+    if ($match.Success) { return [Version]$match.Groups['version'].Value }
+    return $null
+}
+
+function Save-ConduitPendingUpgrade {
+    param(
+        [AllowNull()][Version] $PreviousVersion,
+        [Parameter(Mandatory = $true)][Version] $CurrentVersion,
+        [Parameter(Mandatory = $true)][string] $StateDirectory
+    )
+
+    $pendingPath = Join-Path $StateDirectory 'pending-upgrade.json'
+    if ($null -ne $PreviousVersion -and $PreviousVersion -eq $CurrentVersion) { return }
+    $lock = $null
+    $temporaryPath = "$pendingPath.$PID.tmp"
+    try {
+        $lock = [System.IO.File]::Open((Join-Path $StateDirectory 'upgrade-notes.lock'),
+            [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None)
+        if ($null -eq $PreviousVersion -or $PreviousVersion -gt $CurrentVersion) {
+            # A fresh install or downgrade is not an upgrade announcement.
+            if (Test-Path -LiteralPath $pendingPath -PathType Leaf) {
+                Remove-Item -LiteralPath $pendingPath -Force
+            }
+            return
+        }
+        if (Test-Path -LiteralPath $pendingPath -PathType Leaf) {
+            try {
+                $pending = [System.IO.File]::ReadAllText($pendingPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+                if ([Version]$pending.CurrentVersion -eq $PreviousVersion -and
+                    $pending.PreviousVersion -match '^\d+\.\d+\.\d+$' -and
+                    [Version]$pending.PreviousVersion -lt $PreviousVersion) {
+                    # Multiple updates before first use retain all unseen changes.
+                    $PreviousVersion = [Version]$pending.PreviousVersion
+                }
+            }
+            catch { } # Replace malformed old state with the known upgrade range.
+        }
+        $json = [ordered]@{
+            PreviousVersion = $PreviousVersion.ToString()
+            CurrentVersion = $CurrentVersion.ToString()
+        } | ConvertTo-Json
+        [System.IO.File]::WriteAllText($temporaryPath, $json, [System.Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporaryPath -Destination $pendingPath -Force
+    }
+    finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
+    }
 }
 
 function Test-WireSockInstalled {
@@ -127,7 +191,7 @@ function Protect-ConduitStateDirectory {
 Write-Output 'Conduit installer for Windows'
 Write-Output ''
 
-foreach ($requiredFile in @('conduit.ps1', 'conduit.cmd')) {
+foreach ($requiredFile in @('conduit.ps1', 'conduit.cmd', 'changelog')) {
     $source = Join-Path $sourceDirectory $requiredFile
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Required source file is missing: $source"
@@ -150,11 +214,21 @@ if ($InstallWireGuard -and -not (Test-WireGuardInstalled)) {
     Install-WingetPackage -Id 'WireGuard.WireGuard' -Label 'WireGuard for Windows'
 }
 
+$previousScript = Join-Path $installDirectory 'conduit-main.ps1'
+if (-not (Test-Path -LiteralPath $previousScript -PathType Leaf)) {
+    $previousScript = Join-Path $installDirectory 'conduit.ps1'
+}
+$previousVersion = Get-ConduitScriptVersion -Path $previousScript
+$currentVersion = Get-ConduitScriptVersion -Path (Join-Path $sourceDirectory 'conduit.ps1')
+if ($null -eq $currentVersion) { throw 'The source Conduit version is invalid.' }
+
 New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $sourceDirectory 'conduit.ps1') `
     -Destination (Join-Path $installDirectory 'conduit-main.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $sourceDirectory 'conduit.cmd') `
     -Destination (Join-Path $installDirectory 'conduit.cmd') -Force
+Copy-Item -LiteralPath (Join-Path $sourceDirectory 'changelog') `
+    -Destination (Join-Path $installDirectory 'changelog') -Force
 # A public conduit.ps1 shadows conduit.cmd in PowerShell and bypasses the
 # wrapper's process-scoped ExecutionPolicy override. Remove it when upgrading
 # from Conduit 3.1.1 or older.
@@ -198,6 +272,13 @@ if ($BootstrapIfEmpty -and $profilesBeforeInstall.Count -eq 0) {
 }
 
 Write-Output ''
+try {
+    Save-ConduitPendingUpgrade -PreviousVersion $previousVersion -CurrentVersion $currentVersion `
+        -StateDirectory $stateDirectory
+}
+catch {
+    Write-Warning "Installed successfully, but could not save the one-time upgrade notes: $($_.Exception.Message)"
+}
 Write-Output 'Open a new PowerShell or Command Prompt, then run:'
 Write-Output '  conduit doctor'
 Write-Output '  conduit show-vpn'

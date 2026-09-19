@@ -28,6 +28,9 @@ jobs:
       - name: Run Windows process integration tests
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-integration.ps1
+      - name: Run Windows upgrade notes tests
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-update-notes.ps1
       - name: Run WireSock service CLI integration tests
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-service-cli-integration.ps1

@@ -7,6 +7,9 @@
 
 [CmdletBinding()]
 param(
+    # Reserve -V so PowerShell does not interpret it as the common -Verbose flag.
+    [Alias('V')]
+    [switch] $ShowVersion,
     [Parameter(ValueFromRemainingArguments = $true)]
     [object[]] $ConduitArguments
 )
@@ -14,7 +17,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version = '3.2.8'
+$script:Version = '3.2.9'
 $script:SelfPath = $PSCommandPath
 $script:ExitCode = 0
 $script:InstallerUrl = 'https://raw.githubusercontent.com/blueberi99/conduit/master/bootstrap.ps1'
@@ -218,6 +221,61 @@ add/remove startup manages only the sign-in Startup entry.
 Windows uses WireSock Secure Connect as its per-application WireGuard
 backend. One Conduit VPN session may be active at a time on Windows.
 '@ | Write-Output
+}
+
+
+function Get-ConduitUpgradeNotes {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][Version] $PreviousVersion,
+        [Parameter(Mandatory = $true)][Version] $CurrentVersion
+    )
+
+    $pattern = '(?ms)^# Conduit v(?<version>\d+\.\d+\.\d+)[ \t]*\r?\n.*?(?=^# Conduit v|\z)'
+    foreach ($section in [regex]::Matches($Text, $pattern)) {
+        $version = [Version]$section.Groups['version'].Value
+        if ($version -gt $PreviousVersion -and $version -le $CurrentVersion) {
+            $section.Value.Trim()
+        }
+    }
+}
+
+
+function Show-ConduitUpgradeNotes {
+    $pendingPath = Join-Path $script:StateBase 'pending-upgrade.json'
+    $lock = $null
+    try {
+        if (-not (Test-Path -LiteralPath $pendingPath -PathType Leaf)) { return }
+        # Two simultaneous launches must not both announce the same upgrade.
+        # Do not wait for another process or allow optional notes to block VPN use.
+        $lock = [System.IO.File]::Open((Join-Path $script:StateBase 'upgrade-notes.lock'),
+            [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None)
+        if (-not (Test-Path -LiteralPath $pendingPath -PathType Leaf)) { return }
+        $pending = Read-Utf8File -Path $pendingPath | ConvertFrom-Json
+        if ($pending.PreviousVersion -notmatch '^\d+\.\d+\.\d+$' -or
+            $pending.CurrentVersion -ne $script:Version -or
+            [Version]$pending.PreviousVersion -ge [Version]$script:Version) { return }
+
+        $notesPath = Join-Path (Split-Path -Parent $script:SelfPath) 'changelog'
+        $sections = @(Get-ConduitUpgradeNotes -Text (Read-Utf8File -Path $notesPath) `
+            -PreviousVersion ([Version]$pending.PreviousVersion) -CurrentVersion ([Version]$script:Version))
+        if ($sections.Count -eq 0) { return }
+
+        Write-Host "Conduit updated: $($pending.PreviousVersion) -> $script:Version"
+        Write-Host 'Changes since your previous version:'
+        Write-Host ''
+        Write-Host ($sections -join "`n`n")
+        Write-Host ''
+        Remove-Item -LiteralPath $pendingPath -Force
+    }
+    catch {
+        # Missing/corrupt notes or an unavailable state directory must never
+        # prevent the requested command. Keep pending notes for a later launch.
+    }
+    finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+    }
 }
 
 
@@ -2243,6 +2301,13 @@ function Invoke-Conduit {
     param([object[]] $CommandLine)
 
     $values = @($CommandLine | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    # Keep version output machine-readable; installer and background invocations
+    # must not consume the first user-facing announcement.
+    if ($values.Count -eq 0 -or $values[0] -notin @(
+        '-V', '--version', 'version', '__supervise', 'bootstrap', 'update'
+    )) {
+        Show-ConduitUpgradeNotes
+    }
     if ($values.Count -eq 0) {
         Show-ConduitUsage
         $script:ExitCode = 1
@@ -2392,7 +2457,12 @@ function Invoke-Conduit {
 
 
 try {
-    Invoke-Conduit -CommandLine @($ConduitArguments)
+    if ($ShowVersion) {
+        Invoke-Conduit -CommandLine @('--version')
+    }
+    else {
+        Invoke-Conduit -CommandLine @($ConduitArguments)
+    }
 }
 catch {
     [Console]::Error.WriteLine("conduit: $($_.Exception.Message)")

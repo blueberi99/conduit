@@ -88,7 +88,7 @@ $parts = @($userPath -split ';' | Where-Object {
 
 Remove-ConduitManagedShortcuts
 
-foreach ($name in @('conduit-main.ps1', 'conduit.ps1', 'conduit.cmd')) {
+foreach ($name in @('conduit-main.ps1', 'conduit.ps1', 'conduit.cmd', 'changelog')) {
     Remove-Item -LiteralPath (Join-Path $installDirectory $name) -Force -ErrorAction SilentlyContinue
 }
 if (Test-Path -LiteralPath $installDirectory -PathType Container) {

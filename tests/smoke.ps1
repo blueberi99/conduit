@@ -50,8 +50,8 @@ try {
 
     $version = Invoke-TestCommand @('--version')
     Assert-True ($version.ExitCode -eq 0) 'version command failed'
-    Assert-True ($version.Output -match '^conduit 3\.2\.8$') 'unexpected version output'
-    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.8') `
+    Assert-True ($version.Output -match '^conduit 3\.2\.9$') 'unexpected version output'
+    Assert-True ((Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim() -eq '3.2.9') `
         'VERSION does not match conduit.ps1'
 
     $noArguments = Invoke-TestCommand @()
@@ -288,7 +288,7 @@ public static class ConduitCleanupTestEnvironment {
     Assert-True ($disabledNotice.Output -notmatch 'is available') 'disabled update check still produced a notice'
 
     Remove-Item Env:CONDUIT_NO_UPDATE_CHECK
-    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.8', [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($latestVersionPath, '3.2.9', [System.Text.Encoding]::UTF8)
     $currentNotice = Invoke-TestCommand @('missing.exe')
     Assert-True ($currentNotice.Output -notmatch 'is available') 'current version produced an update notice'
 

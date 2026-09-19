@@ -114,6 +114,13 @@ newer release exists, Conduit prints a warning to run `conduit update`; an
 offline or unreachable check never blocks the VPN session. Set
 `CONDUIT_NO_UPDATE_CHECK=1` to disable this check for the current environment.
 
+After a Windows upgrade, the first normal Conduit command also shows release
+notes for every version newer than your previous installation, up to the newly
+installed version. This appears only once and uses the bundled changelog, so it
+works offline. Fresh installs and same-version reinstalls do not trigger it.
+Version queries, `update`, `bootstrap`, and internal background commands leave
+the notes pending for the next normal invocation.
+
 On Windows, `add shortcut` creates a clearly named `Conduit - <App>` shortcut
 on both the current user's desktop and Start Menu. `add startup` creates a
 managed shortcut in the user's Startup folder so the application launches through

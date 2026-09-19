@@ -1,5 +1,13 @@
 # changelog
 
+# Conduit v3.2.9
+
+- Show release notes once on the first normal Windows invocation after an upgrade
+- Include every skipped release between the previously installed and current
+  versions; keep notes available offline by bundling the changelog
+- Preserve unseen changes across consecutive updates, without announcements on
+  fresh installs, same-version reinstalls, or internal/version-check commands
+
 # Conduit v3.2.8
 
 - Target Windows PowerShell directly in managed shortcuts so Windows includes
